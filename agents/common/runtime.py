@@ -3,6 +3,7 @@
 import os
 import time
 from typing import Any
+import base64
 import json
 
 import uvicorn
@@ -23,6 +24,25 @@ AGENTS = {
 app = FastAPI(title="AgentCore Deployer Agent Runtime")
 
 
+def _parse_invocation_body(raw_body: bytes) -> dict[str, Any]:
+    raw_text = raw_body.decode("utf-8") if raw_body else "{}"
+    candidates = [raw_text, raw_text.strip().strip("'")]
+    try:
+        decoded = base64.b64decode(raw_text, validate=True).decode("utf-8")
+        candidates.append(decoded)
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate or "{}")
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    raise HTTPException(status_code=400, detail="Invocation body must be a JSON object.")
+
+
 @app.get("/ping")
 def ping() -> dict[str, Any]:
     return {"status": "Healthy", "time_of_last_update": int(time.time())}
@@ -35,10 +55,7 @@ async def invoke(request: Request) -> dict[str, Any]:
     if not agent:
         raise HTTPException(status_code=400, detail=f"Unknown AGENT_NAME: {agent_name}")
     raw_body = await request.body()
-    try:
-        body = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invocation body must be JSON.") from exc
+    body = _parse_invocation_body(raw_body)
     payload = body.get("input", body)
     return agent(payload)
 
