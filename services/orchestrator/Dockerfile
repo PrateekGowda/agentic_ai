@@ -9,6 +9,7 @@ COPY services/orchestrator/pyproject.toml /app/services/orchestrator/pyproject.t
 COPY services/orchestrator/src /app/services/orchestrator/src
 COPY agents /app/agents
 COPY samples /app/samples
+COPY templates /app/templates
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir /app/services/orchestrator
