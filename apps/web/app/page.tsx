@@ -19,7 +19,7 @@ export default function Home() {
   const [session, setSession] = useState<DeploymentSession | null>(null);
   const [projects, setProjects] = useState<DeploymentSession[]>([]);
   const [chatMessage, setChatMessage] = useState(
-    "Create an S3 bucket in us-east-1 dev. Project name is ui-s3-demo. Owner platform@example.com. Cost center CC-1001.",
+    "Create an S3 bucket",
   );
   const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
