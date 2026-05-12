@@ -14,6 +14,7 @@ from orchestrator.models import (
     RequirementMessage,
 )
 from orchestrator.settings import Settings
+from orchestrator.state_archive import S3ProjectStateArchive
 
 AGENTS_ROOT = Path(__file__).resolve().parents[4] / "agents"
 if str(AGENTS_ROOT) not in sys.path:
@@ -43,6 +44,7 @@ class DeploymentWorkflow:
             run_compliance_checks,
         )
         self.ec2_httpd = Ec2HttpdManager(settings.aws_region)
+        self.archive = S3ProjectStateArchive(settings.project_state_bucket, settings.aws_region)
 
     def _github(self, session: DeploymentSession) -> GitHubRepositoryClient:
         return GitHubRepositoryClient(
@@ -82,6 +84,7 @@ class DeploymentWorkflow:
                 message=result["message"],
             )
         )
+        self.persist_state(session)
         return session
 
     async def provision(self, session: DeploymentSession) -> DeploymentSession:
@@ -133,6 +136,7 @@ class DeploymentWorkflow:
                 details={"files": sorted(files.keys())},
             )
         )
+        self.persist_state(session)
         return session
 
     async def run_compliance(self, session: DeploymentSession) -> DeploymentSession:
@@ -153,6 +157,7 @@ class DeploymentWorkflow:
                 details={"findings": findings},
             )
         )
+        self.persist_state(session)
         return session
 
     async def deploy(self, session: DeploymentSession) -> DeploymentSession:
@@ -176,6 +181,7 @@ class DeploymentWorkflow:
         if status == DeploymentStatus.succeeded and session.repository_url:
             session.architecture_doc_url = f"{session.repository_url}/blob/main/ARCHITECTURE.md"
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
+        self.persist_state(session)
         return session
 
     async def run_automatic(
@@ -230,6 +236,7 @@ class DeploymentWorkflow:
                 details=resources,
             )
         )
+        self.persist_state(session)
         return session
 
     async def destroy(self, session: DeploymentSession) -> DeploymentSession:
@@ -258,4 +265,13 @@ class DeploymentWorkflow:
                 details=result,
             )
         )
+        self.persist_state(session)
+        return session
+
+    def persist_state(self, session: DeploymentSession) -> DeploymentSession:
+        try:
+            state = self.archive.persist(session)
+            session.resources["project_state"] = state
+        except Exception as exc:
+            session.resources["project_state_error"] = str(exc)
         return session

@@ -528,22 +528,7 @@ resource "aws_iam_role_policy" "ecs_task" {
       {
         Effect = "Allow"
         Action = [
-          "sts:GetCallerIdentity",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "secretsmanager:GetSecretValue",
-          "ssm:GetParameter",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeInstances",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:CreateSecurityGroup",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:DeleteSecurityGroup",
-          "ec2:RunInstances",
-          "ec2:TerminateInstances",
-          "ec2:CreateTags",
-          "bedrock-agentcore:*"
+          "*"
         ]
         Resource = "*"
       }
@@ -578,6 +563,7 @@ resource "aws_ecs_task_definition" "app" {
         { name = "AWS_REGION", value = var.region },
         { name = "GITHUB_OWNER", value = var.github_owner },
         { name = "GITHUB_TOKEN_SECRET_ARN", value = var.github_token_secret_arn },
+        { name = "PROJECT_STATE_BUCKET", value = "hack-aib-tf-backend" },
         { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" }
       ]
       logConfiguration = {

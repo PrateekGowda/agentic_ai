@@ -6,7 +6,7 @@ import { FormEvent, useState } from "react";
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
 
 const defaultAnswers = {
-  name: "customer-api",
+  name: "my-aws-project",
   description: "Serverless API with encrypted storage and compliance reporting",
   owner: "platform@example.com",
   cost_center: "CC-1001",
@@ -134,8 +134,8 @@ export default function Home() {
           <span className="status">{session?.status ?? "not_started"}</span>
         </div>
         <p className="muted" style={{ maxWidth: 780 }}>
-          Gather requirements, create a GitHub infrastructure repository, run policy checks, deploy
-          Terraform, remediate safe failures, and publish documentation from one workflow.
+          Enter a project name, chat with the agent, create a GitHub repository, store state in
+          S3, view logs, and destroy tracked resources when finished.
         </p>
       </section>
 
@@ -143,7 +143,7 @@ export default function Home() {
         <section className="panel stack">
           <div className="row">
             <button className="button secondary" onClick={startSession} disabled={busy}>
-              Start Session
+              New Project Session
             </button>
             <button className="button" onClick={runAutomatically} disabled={busy}>
               Send To Agent
@@ -186,7 +186,7 @@ export default function Home() {
           <form className="stack" onSubmit={submitRequirements}>
             <h2>Requirement Fields</h2>
             <label className="field">
-              Name
+              Project Name
               <input value={answers.name} onChange={(event) => setAnswers({ ...answers, name: event.target.value })} />
             </label>
             <label className="field">
@@ -312,6 +312,22 @@ export default function Home() {
                 <span className="muted">Not created</span>
               )}
             </p>
+            <p>
+              S3 State:{" "}
+              {session?.resources?.project_state?.state_uri ? (
+                <code>{String(session.resources.project_state.state_uri)}</code>
+              ) : (
+                <span className="muted">State is written after the first agent step.</span>
+              )}
+            </p>
+            <p>
+              S3 Logs:{" "}
+              {session?.resources?.project_state?.logs_uri ? (
+                <code>{String(session.resources.project_state.logs_uri)}</code>
+              ) : (
+                <span className="muted">Logs are written after the first agent step.</span>
+              )}
+            </p>
           </section>
 
           <section className="panel stack">
@@ -333,8 +349,15 @@ export default function Home() {
             {session?.events.length ? (
               session.events.map((event) => (
                 <div key={event.id} className={`event ${event.severity}`}>
-                  <strong>{event.agent}</strong>
+                  <strong>
+                    {new Date(event.timestamp).toLocaleTimeString()} - {event.agent} - {event.status}
+                  </strong>
                   <p>{event.message}</p>
+                  {Object.keys(event.details ?? {}).length > 0 ? (
+                    <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                      {JSON.stringify(event.details, null, 2)}
+                    </pre>
+                  ) : null}
                   <small className="muted">{new Date(event.timestamp).toLocaleString()}</small>
                 </div>
               ))
