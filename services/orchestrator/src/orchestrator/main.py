@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -22,6 +22,12 @@ app.add_middleware(
 
 def workflow() -> DeploymentWorkflow:
     return DeploymentWorkflow(get_settings())
+
+
+async def run_session_workflow(session_id: str, request: RequirementMessage) -> None:
+    session = store.get(session_id)
+    updated = await workflow().run_automatic(session, request)
+    store.save(updated)
 
 
 @app.get("/health")
@@ -65,7 +71,7 @@ def set_github_token(session_id: str, request: GitHubTokenRequest) -> dict[str, 
             agent="provisioner",
             severity="success",
             status=session.status or DeploymentStatus.requirements,
-            message="GitHub API token configured for this session. The token is not returned by the API.",
+            message="GitHub token saved for this project session. It will be used for repository creation and is not shown again.",
         )
     )
     return store.save(session).model_dump(mode="json")
@@ -76,6 +82,27 @@ async def run_automatic(session_id: str, request: RequirementMessage) -> dict[st
     session = store.get(session_id)
     updated = await workflow().run_automatic(session, request)
     return store.save(updated).model_dump(mode="json")
+
+
+@app.post("/sessions/{session_id}/run-background")
+def run_automatic_background(
+    session_id: str,
+    request: RequirementMessage,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    session = store.get(session_id)
+    session.add_event(
+        DeploymentEvent(
+            session_id=session.id,
+            agent="requirements",
+            severity="info",
+            status=DeploymentStatus.deploying,
+            message="Agent workflow started. Logs will update while the project runs.",
+        )
+    )
+    store.save(session)
+    background_tasks.add_task(run_session_workflow, session_id, request)
+    return session.model_dump(mode="json")
 
 
 @app.post("/sessions/{session_id}/provision")

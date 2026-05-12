@@ -9,9 +9,10 @@ export type DeploymentStatus =
   | "remediating"
   | "succeeded"
   | "failed"
-  | "blocked";
+  | "blocked"
+  | "destroyed";
 
-export type AgentName = "requirements" | "provisioner" | "deployer" | "compliance";
+export type AgentName = "requirements" | "provisioner" | "deployer" | "compliance" | "destroyer";
 export type EventSeverity = "info" | "warning" | "error" | "success";
 
 export interface DeploymentSpec {
@@ -20,26 +21,26 @@ export interface DeploymentSpec {
   cloud: "aws";
   region: string;
   environment: Environment;
-  workloadType: "s3-lambda-api" | "vpc-baseline";
+  workload_type: "s3-lambda-api" | "vpc-baseline" | "ec2-httpd";
   owner: string;
-  costCenter: string;
-  complianceProfile: "baseline" | "regulated";
-  githubVisibility: "private" | "internal" | "public";
+  cost_center: string;
+  compliance_profile: "baseline" | "regulated";
+  github_visibility: "private" | "internal" | "public";
   tags: Record<string, string>;
-  standardsSource?: string;
+  standards_source?: string;
 }
 
 export interface CustomizationQuestion {
   id: string;
   label: string;
-  helpText?: string;
-  defaultValue?: string;
+  help_text?: string;
+  default_value?: string;
   required: boolean;
 }
 
 export interface DeploymentEvent {
   id: string;
-  sessionId: string;
+  session_id: string;
   timestamp: string;
   agent: AgentName;
   severity: EventSeverity;
@@ -62,14 +63,14 @@ export interface DeploymentSession {
   id: string;
   status: DeploymentStatus;
   spec?: DeploymentSpec;
-  repositoryUrl?: string;
-  architectureDocUrl?: string;
-  complianceReportUrl?: string;
-  customizationQuestions: CustomizationQuestion[];
+  repository_url?: string;
+  architecture_doc_url?: string;
+  compliance_report_url?: string;
+  customization_questions: CustomizationQuestion[];
   findings: ComplianceFinding[];
   events: DeploymentEvent[];
   github_token_configured?: boolean;
   resources?: Record<string, any>;
-  createdAt: string;
-  updatedAt: string;
+  created_at: string;
+  updated_at: string;
 }

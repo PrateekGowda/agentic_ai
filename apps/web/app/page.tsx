@@ -1,7 +1,7 @@
 "use client";
 
 import type { DeploymentSession } from "@agentcore-deployer/contracts";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
 
@@ -26,20 +26,37 @@ export default function Home() {
   );
   const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  async function call<T>(path: string, init?: RequestInit): Promise<T> {
-    setBusy(true);
+  useEffect(() => {
+    refreshProjects().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!session?.id) return;
+    const timer = window.setInterval(async () => {
+      const updated = await call<DeploymentSession>(`/sessions/${session.id}`, { quiet: true } as RequestInit & { quiet?: boolean });
+      setSession(updated);
+      setProjects((current) => [updated, ...current.filter((project) => project.id !== updated.id)]);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [session?.id]);
+
+  async function call<T>(path: string, init?: RequestInit & { quiet?: boolean }): Promise<T> {
+    const { quiet: quietFlag, ...requestInit } = init ?? {};
+    const quiet = quietFlag;
+    if (!quiet) setBusy(true);
     try {
       const response = await fetch(`${apiBaseUrl}${path}`, {
-        headers: { "Content-Type": "application/json", ...init?.headers },
-        ...init,
+        headers: { "Content-Type": "application/json", ...requestInit.headers },
+        ...requestInit,
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
       return (await response.json()) as T;
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
   }
 
@@ -68,6 +85,7 @@ export default function Home() {
     });
     setGithubToken("");
     setSession(updated);
+    setNotice("GitHub token saved for this project session. Now click Send To Agent.");
     await refreshProjects();
   }
 
@@ -97,7 +115,7 @@ export default function Home() {
           ? "ec2-httpd"
           : answers.workload_type,
     };
-    const updated = await call<DeploymentSession>(`/sessions/${current.id}/run`, {
+    const updated = await call<DeploymentSession>(`/sessions/${current.id}/run-background`, {
       method: "POST",
       body: JSON.stringify({
         message: chatMessage,
@@ -105,6 +123,7 @@ export default function Home() {
       }),
     });
     setSession(updated);
+    setNotice("Agent workflow started. Watch Execution Logs for live progress.");
     await refreshProjects();
   }
 
@@ -132,6 +151,9 @@ export default function Home() {
         <div className="row">
           <h1 style={{ margin: 0 }}>AgentCore Multi-Agent Deployer</h1>
           <span className="status">{session?.status ?? "not_started"}</span>
+          <a className="button secondary" href="/projects">
+            Existing Projects
+          </a>
         </div>
         <p className="muted" style={{ maxWidth: 780 }}>
           Enter a project name, chat with the agent, create a GitHub repository, store state in
@@ -141,50 +163,8 @@ export default function Home() {
 
       <div className="grid">
         <section className="panel stack">
-          <div className="row">
-            <button className="button secondary" onClick={startSession} disabled={busy}>
-              New Project Session
-            </button>
-            <button className="button" onClick={runAutomatically} disabled={busy}>
-              Send To Agent
-            </button>
-            <button className="button secondary" onClick={runEc2HttpdTest} disabled={!session || busy}>
-              Run EC2 httpd Test
-            </button>
-            <button className="button secondary" onClick={destroyProject} disabled={!session || busy}>
-              Destroy Project
-            </button>
-            <button className="button" onClick={() => runStep("provision")} disabled={!session?.spec || busy}>
-              Create GitHub Repo
-            </button>
-            <button className="button secondary" onClick={() => runStep("compliance")} disabled={!session?.repositoryUrl || busy}>
-              Run Compliance
-            </button>
-            <button className="button secondary" onClick={() => runStep("approve")} disabled={!session || busy}>
-              Approve Apply
-            </button>
-            <button className="button" onClick={() => runStep("deploy")} disabled={!session || busy}>
-              Deploy
-            </button>
-          </div>
-
-          <section className="stack">
-            <h2>Chatbot</h2>
-            <label className="field">
-              Tell the agents what to build
-              <textarea
-                value={chatMessage}
-                onChange={(event) => setChatMessage(event.target.value)}
-                rows={5}
-              />
-            </label>
-            <p className="muted">
-              Example: `Create a basic EC2 instance, install httpd, show me the URL, then allow destroy`.
-            </p>
-          </section>
-
           <form className="stack" onSubmit={submitRequirements}>
-            <h2>Requirement Fields</h2>
+            <h2>1. Requirement Fields</h2>
             <label className="field">
               Project Name
               <input value={answers.name} onChange={(event) => setAnswers({ ...answers, name: event.target.value })} />
@@ -231,12 +211,9 @@ export default function Home() {
               Send to Requirement Agent
             </button>
           </form>
-          <p className="muted">
-            Use `Send To Agent` to let the agents gather requirements, generate and commit
-            Terraform, run compliance, approve a dev deployment, and publish documentation in one flow.
-          </p>
+          {notice ? <p className="status">{notice}</p> : null}
           <section className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
-            <h2>GitHub Access</h2>
+            <h2>2. GitHub Access</h2>
             <label className="field">
               GitHub API token
               <input
@@ -250,8 +227,36 @@ export default function Home() {
               Save Token For Session
             </button>
             <p className="muted">
-              Use a GitHub token or GitHub App token for repository creation. Do not paste SSH
-              private keys here; revoke any key that has been shared in chat or logs.
+              Save the token after selecting or creating a project session. The token is only held in
+              backend memory for this session and is not displayed again.
+            </p>
+          </section>
+          <section className="stack">
+            <h2>3. Chatbot Request</h2>
+            <label className="field">
+              Tell the agents what to build
+              <textarea
+                value={chatMessage}
+                onChange={(event) => setChatMessage(event.target.value)}
+                rows={5}
+              />
+            </label>
+            <div className="row">
+              <button className="button secondary" onClick={startSession} disabled={busy}>
+                New Project Session
+              </button>
+              <button className="button" onClick={runAutomatically} disabled={busy}>
+                Send To Agent
+              </button>
+              <button className="button secondary" onClick={runEc2HttpdTest} disabled={!session || busy}>
+                Run EC2 httpd Test
+              </button>
+              <button className="button secondary" onClick={destroyProject} disabled={!session || busy}>
+                Destroy Project
+              </button>
+            </div>
+            <p className="muted">
+              Example: `Create a basic EC2 instance, install httpd, show me the URL, then allow destroy`.
             </p>
           </section>
         </section>
@@ -286,9 +291,9 @@ export default function Home() {
             <h2>Repository and Artifacts</h2>
             <p>
               GitHub:{" "}
-              {session?.repositoryUrl ? (
-                <a href={session.repositoryUrl} target="_blank">
-                  {session.repositoryUrl}
+              {session?.repository_url ? (
+                <a href={session.repository_url} target="_blank">
+                  {session.repository_url}
                 </a>
               ) : (
                 <span className="muted">Not created yet</span>
@@ -296,11 +301,11 @@ export default function Home() {
             </p>
             <p>
               Architecture:{" "}
-              {session?.architectureDocUrl ? <a href={session.architectureDocUrl}>ARCHITECTURE.md</a> : <span className="muted">Pending</span>}
+              {session?.architecture_doc_url ? <a href={session.architecture_doc_url}>ARCHITECTURE.md</a> : <span className="muted">Pending</span>}
             </p>
             <p>
               Compliance:{" "}
-              {session?.complianceReportUrl ? <a href={session.complianceReportUrl}>COMPLIANCE.md</a> : <span className="muted">Pending</span>}
+              {session?.compliance_report_url ? <a href={session.compliance_report_url}>COMPLIANCE.md</a> : <span className="muted">Pending</span>}
             </p>
             <p>
               EC2 httpd URL:{" "}
