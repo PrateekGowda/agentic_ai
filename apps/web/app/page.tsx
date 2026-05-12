@@ -3,7 +3,7 @@
 import type { DeploymentSession } from "@agentcore-deployer/contracts";
 import { FormEvent, useState } from "react";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
 
 const defaultAnswers = {
   name: "customer-api",

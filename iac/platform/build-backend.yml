@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - git clone --depth 1 "$REPO_URL" source
+      - cd source
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+  build:
+    commands:
+      - docker build -f services/orchestrator/Dockerfile -t "$BACKEND_REPOSITORY_URI:$IMAGE_TAG" .
+  post_build:
+    commands:
+      - docker push "$BACKEND_REPOSITORY_URI:$IMAGE_TAG"
