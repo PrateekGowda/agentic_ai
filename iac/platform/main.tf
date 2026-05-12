@@ -719,6 +719,7 @@ resource "aws_ecs_task_definition" "app" {
         { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
         { name = "AGENT_LLM_ENABLED", value = tostring(var.agent_llm_enabled) },
         { name = "PROJECT_STATE_BUCKET", value = "hack-aib-tf-backend" },
+        { name = "TERRAFORM_RUNNER_PROJECT_NAME", value = aws_codebuild_project.terraform_runner.name },
         { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" },
         { name = "AGENTCORE_REQUIREMENT_RUNTIME_ARN", value = var.agentcore_requirement_runtime_arn },
         { name = "AGENTCORE_PROVISIONER_RUNTIME_ARN", value = var.agentcore_provisioner_runtime_arn },

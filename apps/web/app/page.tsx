@@ -22,6 +22,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const chatMessages = (session?.resources?.chat_messages as { role: string; content: string }[] | undefined) ?? [];
+  const awaitingApproval = session?.status === "awaiting_approval";
 
   useEffect(() => {
     refreshProjects().catch(() => undefined);
@@ -72,6 +73,17 @@ export default function Home() {
     setSession(updated);
     setNotice("Chat sent. If approval is needed, type approve after reviewing the GitHub architecture and logs.");
     setChatMessage("");
+    await refreshProjects();
+  }
+
+  async function approveDeployment() {
+    if (!session) return;
+    const updated = await call<DeploymentSession>(`/sessions/${session.id}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message: "approve", answers: {} }),
+    });
+    setSession(updated);
+    setNotice("Approval sent. Terraform apply is running and resources will be verified before the project is marked complete.");
     await refreshProjects();
   }
 
@@ -127,6 +139,12 @@ export default function Home() {
               </p>
             </div>
           )}
+          {busy ? (
+            <div className="chatBubble assistant">
+              <strong>Agent</strong>
+              <p>Working with the agents. I will update the logs as each step completes...</p>
+            </div>
+          ) : null}
         </div>
         <label className="field">
           Tell the agents what to build
@@ -142,10 +160,13 @@ export default function Home() {
             New / Select Session
           </button>
           <button className="button" onClick={sendChat} disabled={busy || !chatMessage.trim()}>
-            Send To Agent
+            {busy ? "Agents Working..." : "Send To Agent"}
           </button>
-          <button className="button secondary" onClick={() => setChatMessage("approve")} disabled={!session || busy}>
-            Type Approve
+          <button className="button iconButton" onClick={sendChat} disabled={busy || !chatMessage.trim()} aria-label="Send message to agent">
+            <span aria-hidden="true">↑</span>
+          </button>
+          <button className="button secondary" onClick={approveDeployment} disabled={!awaitingApproval || busy}>
+            {busy && awaitingApproval ? "Deploying..." : "Approve & Deploy"}
           </button>
           <button className="button secondary" onClick={() => destroyProject()} disabled={!session || busy}>
             Destroy Project

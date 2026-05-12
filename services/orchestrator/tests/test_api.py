@@ -64,7 +64,9 @@ def test_automatic_run_completes_happy_path_without_external_credentials():
         "compliance",
         "deployer",
         "deployer",
+        "deployer",
     ]
+    assert result["events"][-1]["message"].startswith("Terraform apply completed")
 
 
 def test_session_github_token_is_not_returned():

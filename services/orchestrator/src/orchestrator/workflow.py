@@ -1,10 +1,13 @@
-import sys
+import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
+import boto3
 from github import GithubException
 
 from orchestrator.agentcore import AgentCoreRuntimeClient
@@ -322,25 +325,278 @@ class DeploymentWorkflow:
             }
         )
         status = DeploymentStatus(result["data"]["status"])
+        if status != DeploymentStatus.succeeded:
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="info",
+                    status=status,
+                    message=result["message"],
+                    details=result["data"],
+                )
+            )
+            self.persist_state(session)
+            return session
+
         session.add_event(
             DeploymentEvent(
                 session_id=session.id,
                 agent="deployer",
-                severity="success" if status == DeploymentStatus.succeeded else "info",
-                status=status,
-                message=result["message"],
-                details=result["data"],
+                severity="info",
+                status=DeploymentStatus.deploying,
+                message="Approval received. Starting Terraform apply in CodeBuild and waiting for resource verification.",
+                details={"runner": self.settings.terraform_runner_project_name, "repository_url": session.repository_url},
             )
         )
-        if status == DeploymentStatus.succeeded and session.repository_url:
+        self.persist_state(session)
+        apply_result = self._run_terraform_apply(session)
+        if not apply_result.get("verified"):
+            message = "Terraform apply did not complete with verified running resources."
+            self._add_chat_message(session, "assistant", f"{message} Check deployment logs for the CodeBuild failure details.")
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="error",
+                    status=DeploymentStatus.failed,
+                    message=message,
+                    details=apply_result,
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="deployer",
+                severity="success",
+                status=DeploymentStatus.succeeded,
+                message="Terraform apply completed and AWS resources were verified as running/available.",
+                details=apply_result,
+            )
+        )
+        session.resources["terraform_deployment"] = apply_result
+        if session.repository_url:
             session.architecture_doc_url = f"{session.repository_url}/blob/main/ARCHITECTURE.md"
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
-        if status == DeploymentStatus.succeeded and session.spec and session.spec.workload_type == "s3-bucket":
-            session = await self.run_s3_bucket_test(session)
-        if status == DeploymentStatus.succeeded and session.spec and session.spec.workload_type == "ec2-httpd":
-            session = await self.run_ec2_httpd_test(session)
         self.persist_state(session)
         return session
+
+    def _run_terraform_apply(self, session: DeploymentSession) -> dict[str, object]:
+        if not session.spec or not session.repository_url:
+            return {"verified": False, "error": "Missing completed spec or repository URL."}
+        github = self._github(session)
+        if not github.is_configured:
+            if self.settings.app_env == "local":
+                return {
+                    "verified": True,
+                    "dry_run": True,
+                    "resources": [{"type": session.spec.workload_type, "state": "verified-local-dry-run"}],
+                }
+            return {"verified": False, "error": "GitHub token is required so CodeBuild can clone the generated repository."}
+
+        repo_full_name = self._repo_full_name(session.repository_url)
+        result_key = f"{session.spec.name}/{session.id}/deployments/terraform-apply.json"
+        environment = [
+            {"name": "GITHUB_REPOSITORY", "value": repo_full_name, "type": "PLAINTEXT"},
+            {"name": "AWS_REGION", "value": session.spec.region, "type": "PLAINTEXT"},
+            {"name": "WORKLOAD_TYPE", "value": session.spec.workload_type, "type": "PLAINTEXT"},
+            {"name": "PROJECT_STATE_BUCKET", "value": self.settings.project_state_bucket, "type": "PLAINTEXT"},
+            {"name": "RESULT_KEY", "value": result_key, "type": "PLAINTEXT"},
+        ]
+        if self.settings.github_token_secret_arn:
+            environment.append({"name": "GITHUB_TOKEN", "value": self.settings.github_token_secret_arn, "type": "SECRETS_MANAGER"})
+        elif session.github_token or self.settings.github_token:
+            environment.append({"name": "GITHUB_TOKEN", "value": session.github_token or self.settings.github_token or "", "type": "PLAINTEXT"})
+
+        codebuild = boto3.client("codebuild", region_name=self.settings.aws_region)
+        build = codebuild.start_build(
+            projectName=self.settings.terraform_runner_project_name,
+            buildspecOverride=self._terraform_apply_buildspec(),
+            environmentVariablesOverride=environment,
+        )["build"]
+        build_id = build["id"]
+        build_arn = build.get("arn")
+        logs_url = build.get("logs", {}).get("deepLink")
+        session.resources["terraform_apply"] = {
+            "build_id": build_id,
+            "build_arn": build_arn,
+            "logs_url": logs_url,
+            "result_s3_uri": f"s3://{self.settings.project_state_bucket}/{result_key}",
+        }
+
+        terminal_statuses = {"SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT"}
+        status = "IN_PROGRESS"
+        for _ in range(360):
+            current = codebuild.batch_get_builds(ids=[build_id])["builds"][0]
+            status = current["buildStatus"]
+            logs_url = current.get("logs", {}).get("deepLink") or logs_url
+            if status in terminal_statuses:
+                break
+            time.sleep(10)
+
+        result = self._read_deployment_result(result_key)
+        result.update(
+            {
+                "verified": bool(status == "SUCCEEDED" and result.get("verified")),
+                "codebuild_status": status,
+                "build_id": build_id,
+                "build_arn": build_arn,
+                "logs_url": logs_url,
+                "result_s3_uri": f"s3://{self.settings.project_state_bucket}/{result_key}",
+                "repository": repo_full_name,
+            }
+        )
+        return result
+
+    def _read_deployment_result(self, key: str) -> dict[str, object]:
+        try:
+            response = self.archive.s3.get_object(Bucket=self.settings.project_state_bucket, Key=key)
+            return json.loads(response["Body"].read().decode("utf-8"))
+        except Exception as exc:
+            return {"verified": False, "error": f"Unable to read Terraform deployment result: {exc}"}
+
+    def _repo_full_name(self, repository_url: str) -> str:
+        suffix = repository_url.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+        if "/" not in suffix:
+            raise ValueError(f"Unable to parse GitHub repository URL: {repository_url}")
+        return suffix
+
+    def _terraform_apply_buildspec(self) -> str:
+        return r"""version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
+        git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
+        cd repo/terraform
+        terraform init -input=false -reconfigure
+        terraform validate
+  build:
+    commands:
+      - |
+        set +e
+        cd repo/terraform
+        terraform apply -auto-approve -input=false
+        APPLY_EXIT=$?
+        if [ "$APPLY_EXIT" -ne 0 ]; then
+          python3 - <<'PY'
+import json, os
+payload = {"verified": False, "stage": "terraform_apply", "error": "terraform apply failed"}
+open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+PY
+          exit "$APPLY_EXIT"
+        fi
+        python3 - <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+
+import boto3
+
+region = os.environ["AWS_REGION"]
+workload = os.environ["WORKLOAD_TYPE"]
+state = json.loads(subprocess.check_output(["terraform", "state", "pull"], text=True))
+resources = state.get("resources", [])
+verified = []
+
+def attrs(resource_type):
+    for resource in resources:
+        if resource.get("type") == resource_type:
+            for instance in resource.get("instances", []):
+                yield instance.get("attributes", {})
+
+try:
+    if workload == "s3-lambda-api":
+        functions = list(attrs("aws_lambda_function"))
+        if not functions:
+            raise RuntimeError("Terraform state has no aws_lambda_function resource")
+        client = boto3.client("lambda", region_name=region)
+        for item in functions:
+            name = item.get("function_name") or item.get("id")
+            if not name:
+                raise RuntimeError("Lambda function resource is missing function_name/id")
+            state_name = "Unknown"
+            for _ in range(24):
+                config = client.get_function_configuration(FunctionName=name)
+                state_name = config.get("State", "Unknown")
+                if state_name == "Active":
+                    break
+                time.sleep(5)
+            if state_name != "Active":
+                raise RuntimeError(f"Lambda function {name} is {state_name}, not Active")
+            verified.append({"type": "lambda", "name": name, "state": state_name})
+    elif workload == "s3-bucket":
+        buckets = list(attrs("aws_s3_bucket"))
+        if not buckets:
+            raise RuntimeError("Terraform state has no aws_s3_bucket resource")
+        client = boto3.client("s3", region_name=region)
+        for item in buckets:
+            name = item.get("bucket") or item.get("id")
+            if not name:
+                raise RuntimeError("S3 bucket resource is missing bucket/id")
+            client.head_bucket(Bucket=name)
+            verified.append({"type": "s3_bucket", "name": name, "state": "available"})
+    elif workload == "ec2-httpd":
+        instances = list(attrs("aws_instance"))
+        if not instances:
+            raise RuntimeError("Terraform state has no aws_instance resource")
+        client = boto3.client("ec2", region_name=region)
+        for item in instances:
+            instance_id = item.get("id")
+            if not instance_id:
+                raise RuntimeError("EC2 instance resource is missing id")
+            state_name = "unknown"
+            for _ in range(36):
+                response = client.describe_instances(InstanceIds=[instance_id])
+                state_name = response["Reservations"][0]["Instances"][0]["State"]["Name"]
+                if state_name == "running":
+                    break
+                time.sleep(5)
+            if state_name != "running":
+                raise RuntimeError(f"EC2 instance {instance_id} is {state_name}, not running")
+            verified.append({"type": "ec2_instance", "id": instance_id, "state": state_name})
+    elif workload == "vpc-baseline":
+        vpcs = list(attrs("aws_vpc"))
+        if not vpcs:
+            raise RuntimeError("Terraform state has no aws_vpc resource")
+        client = boto3.client("ec2", region_name=region)
+        for item in vpcs:
+            vpc_id = item.get("id")
+            if not vpc_id:
+                raise RuntimeError("VPC resource is missing id")
+            client.describe_vpcs(VpcIds=[vpc_id])
+            verified.append({"type": "vpc", "id": vpc_id, "state": "available"})
+    else:
+        if not resources:
+            raise RuntimeError("Terraform apply completed but state is empty")
+        verified.append({"type": "terraform_state", "count": len(resources), "state": "present"})
+
+    payload = {"verified": True, "stage": "resource_verification", "resources": verified}
+except Exception as exc:
+    payload = {"verified": False, "stage": "resource_verification", "error": str(exc)}
+    open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+    sys.exit(1)
+
+open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+PY
+  post_build:
+    commands:
+      - |
+        if [ -f /tmp/deployment-result.json ]; then
+          aws s3 cp /tmp/deployment-result.json "s3://${PROJECT_STATE_BUCKET}/${RESULT_KEY}" --sse AES256
+        else
+          printf '{"verified": false, "error": "deployment result file was not produced"}' > /tmp/deployment-result.json
+          aws s3 cp /tmp/deployment-result.json "s3://${PROJECT_STATE_BUCKET}/${RESULT_KEY}" --sse AES256
+        fi
+"""
 
     async def chat(self, session: DeploymentSession, request: RequirementMessage) -> DeploymentSession:
         self._add_chat_message(session, "user", request.message)
@@ -379,7 +635,10 @@ class DeploymentWorkflow:
                 )
             )
             session = await self.deploy(session)
-            self._add_chat_message(session, "assistant", "Deployment is complete. Review the repository, artifacts, and resource details on the right.")
+            if session.status == DeploymentStatus.succeeded:
+                self._add_chat_message(session, "assistant", "Deployment is complete and AWS resources were verified. Review the repository, artifacts, and resource details on the right.")
+            else:
+                self._add_chat_message(session, "assistant", "Deployment did not verify successfully. Review the terminal logs and CodeBuild link in the deployment details.")
             return session
 
         answers = dict(session.resources.get("chat_answers", {}))
@@ -390,7 +649,25 @@ class DeploymentWorkflow:
         session.resources["chat_answers"] = answers
 
         if session.spec and self._is_update_request(request.message, extracted):
-            session = await self._update_existing_project(session, answers, request.message)
+            session = await self._update_existing_project(session, extracted, request.message)
+            return session
+
+        if session.spec and session.status == DeploymentStatus.succeeded:
+            message = (
+                "This project is already deployed and verified. Tell me what to update, for example "
+                "`update instance type to t3.small` or `change region to us-west-2`, and I will prepare a new GitHub diff."
+            )
+            self._add_chat_message(session, "assistant", message)
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="requirements",
+                    severity="info",
+                    status=session.status,
+                    message="No update requested for an already deployed project.",
+                )
+            )
+            self.persist_state(session)
             return session
 
         missing = [key for key in ("name", "description", "owner", "cost_center") if not answers.get(key)]
@@ -438,7 +715,10 @@ class DeploymentWorkflow:
                     )
                 )
                 session = await self.deploy(session)
-                self._add_chat_message(session, "assistant", "Deployment is complete. Review the repository, artifacts, and resource details on the right.")
+                if session.status == DeploymentStatus.succeeded:
+                    self._add_chat_message(session, "assistant", "Deployment is complete and AWS resources were verified. Review the repository, artifacts, and resource details on the right.")
+                else:
+                    self._add_chat_message(session, "assistant", "Deployment did not verify successfully. Review the terminal logs and CodeBuild link in the deployment details.")
                 return session
             if mode == "manual":
                 approval_message = (
@@ -479,16 +759,36 @@ class DeploymentWorkflow:
     ) -> DeploymentSession:
         if not session.spec:
             return session
+        fingerprint = json.dumps({"message": message.strip().lower(), "updates": answers}, sort_keys=True)
+        if session.resources.get("last_update_fingerprint") == fingerprint and session.status in {
+            DeploymentStatus.customizing,
+            DeploymentStatus.repo_created,
+            DeploymentStatus.awaiting_approval,
+            DeploymentStatus.deploying,
+        }:
+            self._add_chat_message(session, "assistant", "I already accepted that update and it is still in progress or waiting for approval.")
+            self.persist_state(session)
+            return session
         spec_data = session.spec.model_dump(mode="json")
         for key in ("description", "region", "environment", "owner", "cost_center", "workload_type"):
+            if key == "description" and "description" not in message.lower():
+                continue
             if answers.get(key):
                 spec_data[key] = answers[key]
         tags = dict(spec_data.get("tags", {}))
         if instance_type := answers.get("instance_type"):
             tags["InstanceType"] = instance_type
         spec_data["tags"] = tags
+        if spec_data == session.spec.model_dump(mode="json"):
+            self._add_chat_message(session, "assistant", "I did not find a resource change in that message, so I did not regenerate or redeploy the project.")
+            self.persist_state(session)
+            return session
         session.spec = DeploymentSpec(**spec_data)
         session.resources["chat_answers"] = {**answers, **session.spec.model_dump(mode="json")}
+        session.resources["last_update_fingerprint"] = fingerprint
+        session.resources.pop("auto_deploy_after_seconds", None)
+        session.resources.pop("auto_deploy_scheduled", None)
+        session.approved = False
         self._add_chat_message(
             session,
             "assistant",

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     agent_llm_enabled: bool = True
     company_standards_path: str = "./samples/company-standards.md"
     project_state_bucket: str = "hack-aib-tf-backend"
+    terraform_runner_project_name: str = "agentcore-deployer-dev-terraform-runner"
     agentcore_memory_id: str | None = None
 
     agentcore_requirement_runtime_arn: str | None = None
