@@ -20,6 +20,7 @@ const defaultAnswers = {
 export default function Home() {
   const [session, setSession] = useState<DeploymentSession | null>(null);
   const [answers, setAnswers] = useState(defaultAnswers);
+  const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -42,9 +43,25 @@ export default function Home() {
     setSession(await call<DeploymentSession>("/sessions", { method: "POST" }));
   }
 
+  async function ensureSession() {
+    const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
+    setSession(current);
+    return current;
+  }
+
+  async function saveGithubToken() {
+    const current = await ensureSession();
+    const updated = await call<DeploymentSession>(`/sessions/${current.id}/github-token`, {
+      method: "POST",
+      body: JSON.stringify({ token: githubToken }),
+    });
+    setGithubToken("");
+    setSession(updated);
+  }
+
   async function submitRequirements(event: FormEvent) {
     event.preventDefault();
-    const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
+    const current = await ensureSession();
     const updated = await call<DeploymentSession>(`/sessions/${current.id}/requirements`, {
       method: "POST",
       body: JSON.stringify({ message: "Create infrastructure from UI answers.", answers }),
@@ -58,7 +75,7 @@ export default function Home() {
   }
 
   async function runAutomatically() {
-    const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
+    const current = await ensureSession();
     const updated = await call<DeploymentSession>(`/sessions/${current.id}/run`, {
       method: "POST",
       body: JSON.stringify({
@@ -157,6 +174,25 @@ export default function Home() {
             Use `Run Automatically` to let the agents gather requirements, generate and commit
             Terraform, run compliance, approve a dev deployment, and publish documentation in one flow.
           </p>
+          <section className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+            <h2>GitHub Access</h2>
+            <label className="field">
+              GitHub API token
+              <input
+                type="password"
+                value={githubToken}
+                placeholder="Paste a fine-scoped token; it is stored only for this session"
+                onChange={(event) => setGithubToken(event.target.value)}
+              />
+            </label>
+            <button className="button secondary" onClick={saveGithubToken} disabled={!githubToken || busy}>
+              Save Token For Session
+            </button>
+            <p className="muted">
+              Use a GitHub token or GitHub App token for repository creation. Do not paste SSH
+              private keys here; revoke any key that has been shared in chat or logs.
+            </p>
+          </section>
         </section>
 
         <aside className="stack">

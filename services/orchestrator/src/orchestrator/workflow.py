@@ -28,7 +28,6 @@ from requirement_agent import handle_requirement_message  # noqa: E402
 class DeploymentWorkflow:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.github = GitHubRepositoryClient(settings.github_token, settings.github_owner)
         self.requirements = AgentCoreRuntimeClient(
             settings.agentcore_requirement_runtime_arn,
             handle_requirement_message,
@@ -41,6 +40,12 @@ class DeploymentWorkflow:
         self.compliance = AgentCoreRuntimeClient(
             settings.agentcore_compliance_runtime_arn,
             run_compliance_checks,
+        )
+
+    def _github(self, session: DeploymentSession) -> GitHubRepositoryClient:
+        return GitHubRepositoryClient(
+            token=session.github_token or self.settings.github_token,
+            owner=self.settings.github_owner,
         )
 
     async def gather_requirements(
@@ -83,7 +88,8 @@ class DeploymentWorkflow:
 
         result = await self.provisioner.invoke({"spec": session.spec.model_dump()})
         data = result["data"]
-        repo = self.github.create_repository(data["repo_name"], private=data["private"])
+        github = self._github(session)
+        repo = github.create_repository(data["repo_name"], private=data["private"])
         session.repository_url = repo.url
         files = dict(data["files"])
         template_root = (
@@ -97,7 +103,7 @@ class DeploymentWorkflow:
                 files[f"terraform/{path}"] = content
 
         for path, content in files.items():
-            self.github.upsert_file(
+            github.upsert_file(
                 repo_full_name=repo.full_name,
                 path=path,
                 content=content,
@@ -106,7 +112,7 @@ class DeploymentWorkflow:
 
         provision_message = (
             f"Created GitHub repository and committed generated infrastructure: {repo.url}"
-            if self.github.is_configured
+            if github.is_configured
             else (
                 "Prepared generated infrastructure files. Configure GITHUB_TOKEN or "
                 f"GITHUB_TOKEN_SECRET_ARN to create and update the real repository: {repo.url}"

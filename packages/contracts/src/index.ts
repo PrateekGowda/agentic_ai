@@ -68,6 +68,7 @@ export interface DeploymentSession {
   customizationQuestions: CustomizationQuestion[];
   findings: ComplianceFinding[];
   events: DeploymentEvent[];
+  github_token_configured?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -39,6 +39,10 @@ class RequirementMessage(BaseModel):
     answers: dict[str, str] = Field(default_factory=dict)
 
 
+class GitHubTokenRequest(BaseModel):
+    token: str
+
+
 class CustomizationQuestion(BaseModel):
     id: str
     label: str
@@ -79,6 +83,8 @@ class DeploymentSession(BaseModel):
     findings: list[ComplianceFinding] = Field(default_factory=list)
     events: list[DeploymentEvent] = Field(default_factory=list)
     approved: bool = False
+    github_token: str | None = Field(default=None, exclude=True)
+    github_token_configured: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

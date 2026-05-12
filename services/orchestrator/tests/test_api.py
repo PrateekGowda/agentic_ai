@@ -65,3 +65,16 @@ def test_automatic_run_completes_happy_path_without_external_credentials():
         "deployer",
         "deployer",
     ]
+
+
+def test_session_github_token_is_not_returned():
+    client = TestClient(app)
+    session = client.post("/sessions").json()
+
+    updated = client.post(
+        f"/sessions/{session['id']}/github-token",
+        json={"token": "ghp_test_secret"},
+    ).json()
+
+    assert updated["github_token_configured"] is True
+    assert "github_token" not in updated

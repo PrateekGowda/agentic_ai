@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from orchestrator.models import RequirementMessage
+from orchestrator.models import DeploymentEvent, DeploymentStatus, GitHubTokenRequest, RequirementMessage
 from orchestrator.settings import get_settings
 from orchestrator.store import store
 from orchestrator.workflow import DeploymentWorkflow
@@ -47,6 +47,23 @@ async def gather_requirements(session_id: str, request: RequirementMessage) -> d
     session = store.get(session_id)
     updated = await workflow().gather_requirements(session, request)
     return store.save(updated).model_dump(mode="json")
+
+
+@app.post("/sessions/{session_id}/github-token")
+def set_github_token(session_id: str, request: GitHubTokenRequest) -> dict[str, object]:
+    session = store.get(session_id)
+    session.github_token = request.token.strip()
+    session.github_token_configured = bool(session.github_token)
+    session.add_event(
+        DeploymentEvent(
+            session_id=session.id,
+            agent="provisioner",
+            severity="success",
+            status=session.status or DeploymentStatus.requirements,
+            message="GitHub API token configured for this session. The token is not returned by the API.",
+        )
+    )
+    return store.save(session).model_dump(mode="json")
 
 
 @app.post("/sessions/{session_id}/run")
