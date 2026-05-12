@@ -443,13 +443,9 @@ class DeploymentWorkflow:
         env = re.search(r"\b(dev|test|stage|prod)\b", message, re.I)
         if env:
             answers["environment"] = env.group(1).lower()
-        name = re.search(
-            r"(?:project|application|app|bucket)\s*(?:name|called|named)?\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
-            message,
-            re.I,
-        )
+        name = self._extract_project_name(message)
         if name:
-            answers["name"] = name.group(1)
+            answers["name"] = name
         elif "s3" in lower and "bucket" in lower:
             answers["name"] = "chat-s3-bucket"
         if message.strip() and len(message.split()) > 3:
@@ -459,6 +455,21 @@ class DeploymentWorkflow:
         elif "s3 bucket" in lower or "bucket" in lower:
             answers["workload_type"] = "s3-bucket"
         return answers
+
+    def _extract_project_name(self, message: str) -> str | None:
+        patterns = [
+            r"\bproject\s+name\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
+            r"\b(?:project|application|app)\s+(?:called|named)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
+            r"\b(?:project|application|app)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
+            r"\bbucket\s+name\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
+            r"\bbucket\s+(?:called|named)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
+        ]
+        ignored = {"project", "bucket", "called", "named", "name", "create"}
+        for pattern in patterns:
+            match = re.search(pattern, message, re.I)
+            if match and match.group(1).lower() not in ignored:
+                return match.group(1)
+        return None
 
     def _is_approval(self, message: str) -> bool:
         return message.strip().lower() in {"approve", "approved", "yes", "go", "deploy", "proceed"}
