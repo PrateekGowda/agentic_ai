@@ -1,0 +1,26 @@
+terraform {
+  required_version = ">= 1.6.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  backend "s3" {
+    bucket         = "$name-$environment-tfstate"
+    key            = "$name/$environment/terraform.tfstate"
+    region         = "$region"
+    encrypt        = true
+    dynamodb_table = "$name-$environment-tflock"
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = local.tags
+  }
+}

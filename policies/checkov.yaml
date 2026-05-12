@@ -1,0 +1,7 @@
+framework:
+  - terraform
+quiet: true
+compact: true
+soft-fail: false
+skip-check:
+  - CKV_AWS_18 # Access logging is template-specific and can be enabled per workload profile.

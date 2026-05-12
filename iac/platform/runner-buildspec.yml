@@ -1,0 +1,20 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Installing Terraform and policy tooling in the runner image"
+  pre_build:
+    commands:
+      - terraform fmt -check -recursive
+      - terraform init -input=false
+      - terraform validate
+  build:
+    commands:
+      - terraform plan -input=false -out=tfplan
+      - terraform show -json tfplan > terraform-plan.json
+      - checkov -d . --config-file policies/checkov.yaml
+      - opa eval --data policies --input terraform-plan.json "data.company.terraform.deny"
+  post_build:
+    commands:
+      - echo "Apply is triggered only after orchestrator approval"

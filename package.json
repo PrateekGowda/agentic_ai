@@ -1,0 +1,19 @@
+{
+  "name": "agentcore-multi-agent-deployer",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "pytest services/orchestrator/tests"
+  },
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  }
+}
