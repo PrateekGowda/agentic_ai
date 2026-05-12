@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+import boto3
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = "local"
     aws_region: str = "us-east-1"
     github_token: str | None = None
+    github_token_secret_arn: str | None = None
     github_owner: str | None = None
     company_standards_path: str = "./samples/company-standards.md"
 
@@ -20,4 +22,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if not settings.github_token and settings.github_token_secret_arn:
+        client = boto3.client("secretsmanager", region_name=settings.aws_region)
+        secret = client.get_secret_value(SecretId=settings.github_token_secret_arn)
+        settings.github_token = secret.get("SecretString")
+    return settings

@@ -37,3 +37,15 @@ output "backend_service_url" {
 output "web_service_url" {
   value = var.deploy_services ? aws_apprunner_service.web[0].service_url : null
 }
+
+output "ecs_cluster_name" {
+  value = var.deploy_ecs ? aws_ecs_cluster.app[0].name : null
+}
+
+output "ecs_service_name" {
+  value = var.deploy_ecs ? aws_ecs_service.app[0].name : null
+}
+
+output "ecs_security_group_id" {
+  value = var.deploy_ecs ? aws_security_group.ecs_app[0].id : null
+}

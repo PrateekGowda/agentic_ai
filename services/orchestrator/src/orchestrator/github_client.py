@@ -6,6 +6,7 @@ from github import Github, GithubException
 @dataclass(frozen=True)
 class RepositoryResult:
     name: str
+    full_name: str
     url: str
 
 
@@ -14,10 +15,15 @@ class GitHubRepositoryClient:
         self._token = token
         self._owner = owner
 
+    @property
+    def is_configured(self) -> bool:
+        return bool(self._token and self._owner)
+
     def create_repository(self, name: str, private: bool = True) -> RepositoryResult:
         if not self._token or not self._owner:
             return RepositoryResult(
                 name=name,
+                full_name=f"{self._owner or 'example-org'}/{name}",
                 url=f"https://github.com/{self._owner or 'example-org'}/{name}",
             )
 
@@ -25,11 +31,18 @@ class GitHubRepositoryClient:
         try:
             org = github.get_organization(self._owner)
             repo = org.create_repo(name=name, private=private, auto_init=True)
-        except GithubException:
+        except GithubException as exc:
+            if exc.status not in {404, 422}:
+                raise
             user = github.get_user()
-            repo = user.create_repo(name=name, private=private, auto_init=True)
+            try:
+                repo = user.create_repo(name=name, private=private, auto_init=True)
+            except GithubException as user_exc:
+                if user_exc.status != 422:
+                    raise
+                repo = github.get_repo(f"{self._owner}/{name}")
 
-        return RepositoryResult(name=repo.name, url=repo.html_url)
+        return RepositoryResult(name=repo.name, full_name=repo.full_name, url=repo.html_url)
 
     def upsert_file(
         self,

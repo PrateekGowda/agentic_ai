@@ -49,6 +49,13 @@ async def gather_requirements(session_id: str, request: RequirementMessage) -> d
     return store.save(updated).model_dump(mode="json")
 
 
+@app.post("/sessions/{session_id}/run")
+async def run_automatic(session_id: str, request: RequirementMessage) -> dict[str, object]:
+    session = store.get(session_id)
+    updated = await workflow().run_automatic(session, request)
+    return store.save(updated).model_dump(mode="json")
+
+
 @app.post("/sessions/{session_id}/provision")
 async def provision(session_id: str) -> dict[str, object]:
     session = store.get(session_id)

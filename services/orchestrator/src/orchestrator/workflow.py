@@ -21,6 +21,7 @@ if str(AGENTS_ROOT) not in sys.path:
 from compliance_agent import run_compliance_checks  # noqa: E402
 from deployer_agent import run_deployment_step  # noqa: E402
 from provisioner_agent import provision_repository_payload  # noqa: E402
+from provisioner_agent.agent import render_terraform  # noqa: E402
 from requirement_agent import handle_requirement_message  # noqa: E402
 
 
@@ -84,6 +85,33 @@ class DeploymentWorkflow:
         data = result["data"]
         repo = self.github.create_repository(data["repo_name"], private=data["private"])
         session.repository_url = repo.url
+        files = dict(data["files"])
+        template_root = (
+            Path(__file__).resolve().parents[4]
+            / "templates"
+            / "terraform"
+            / session.spec.workload_type
+        )
+        if template_root.exists():
+            for path, content in render_terraform(session.spec.model_dump(), template_root).items():
+                files[f"terraform/{path}"] = content
+
+        for path, content in files.items():
+            self.github.upsert_file(
+                repo_full_name=repo.full_name,
+                path=path,
+                content=content,
+                message=f"Generate {path}",
+            )
+
+        provision_message = (
+            f"Created GitHub repository and committed generated infrastructure: {repo.url}"
+            if self.github.is_configured
+            else (
+                "Prepared generated infrastructure files. Configure GITHUB_TOKEN or "
+                f"GITHUB_TOKEN_SECRET_ARN to create and update the real repository: {repo.url}"
+            )
+        )
         session.customization_questions = [
             CustomizationQuestion(**question) for question in data["customization_questions"]
         ]
@@ -93,8 +121,8 @@ class DeploymentWorkflow:
                 agent="provisioner",
                 severity="success",
                 status=DeploymentStatus.repo_created,
-                message=f"Created GitHub repository: {repo.url}",
-                details={"files": sorted(data["files"].keys())},
+                message=provision_message,
+                details={"files": sorted(files.keys())},
             )
         )
         return session
@@ -141,3 +169,29 @@ class DeploymentWorkflow:
             session.architecture_doc_url = f"{session.repository_url}/blob/main/ARCHITECTURE.md"
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
         return session
+
+    async def run_automatic(
+        self,
+        session: DeploymentSession,
+        request: RequirementMessage,
+    ) -> DeploymentSession:
+        session = await self.gather_requirements(session, request)
+        if not session.spec:
+            return session
+
+        session = await self.provision(session)
+        session = await self.run_compliance(session)
+        if session.status == DeploymentStatus.blocked:
+            return session
+
+        session.approved = True
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="deployer",
+                severity="info",
+                status=DeploymentStatus.deploying,
+                message="No blocking compliance findings found; automatic dev deployment approved.",
+            )
+        )
+        return await self.deploy(session)

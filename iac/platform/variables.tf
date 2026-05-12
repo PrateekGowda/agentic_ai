@@ -42,3 +42,15 @@ variable "deploy_services" {
   description = "Set true after images are pushed to ECR so App Runner can deploy them."
   default     = false
 }
+
+variable "deploy_ecs" {
+  type        = bool
+  description = "Set true to deploy the application on ECS Fargate."
+  default     = false
+}
+
+variable "github_token_secret_arn" {
+  type        = string
+  description = "Optional Secrets Manager ARN containing a GitHub token or GitHub App installation token."
+  default     = ""
+}

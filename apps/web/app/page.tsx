@@ -57,6 +57,18 @@ export default function Home() {
     setSession(await call<DeploymentSession>(`/sessions/${session.id}/${step}`, { method: "POST" }));
   }
 
+  async function runAutomatically() {
+    const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
+    const updated = await call<DeploymentSession>(`/sessions/${current.id}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: "Run the complete deployment workflow automatically from UI answers.",
+        answers,
+      }),
+    });
+    setSession(updated);
+  }
+
   return (
     <main className="shell">
       <section className="stack" style={{ marginBottom: 24 }}>
@@ -75,6 +87,9 @@ export default function Home() {
           <div className="row">
             <button className="button secondary" onClick={startSession} disabled={busy}>
               Start Session
+            </button>
+            <button className="button" onClick={runAutomatically} disabled={busy}>
+              Run Automatically
             </button>
             <button className="button" onClick={() => runStep("provision")} disabled={!session?.spec || busy}>
               Create GitHub Repo
@@ -138,6 +153,10 @@ export default function Home() {
               Send to Requirement Agent
             </button>
           </form>
+          <p className="muted">
+            Use `Run Automatically` to let the agents gather requirements, generate and commit
+            Terraform, run compliance, approve a dev deployment, and publish documentation in one flow.
+          </p>
         </section>
 
         <aside className="stack">

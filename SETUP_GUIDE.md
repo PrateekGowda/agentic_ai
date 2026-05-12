@@ -127,11 +127,19 @@ On the web page:
 
 1. Click `Start Session`.
 2. Fill in application name, description, owner, cost center, region, and environment.
-3. Click `Send to Requirement Agent`.
-4. Click `Create GitHub Repo`.
-5. Click `Run Compliance`.
-6. If compliance is successful, click `Approve Apply`.
-7. Click `Deploy`.
+3. Click `Run Automatically`.
+
+The agents will run these steps for you:
+
+1. Gather and validate requirements.
+2. Create or reuse the GitHub infrastructure repository.
+3. Generate Terraform and documentation.
+4. Commit generated files to GitHub.
+5. Run compliance checks.
+6. Approve a non-production deployment when there are no blocking findings.
+7. Mark deployment complete and publish artifact links.
+
+You can still use the individual buttons if you want to test one step at a time.
 
 The right side of the UI shows:
 
@@ -229,9 +237,11 @@ If the UI cannot connect to the backend:
 
 If GitHub repository creation fails:
 
-- Confirm `GITHUB_TOKEN` is set.
+- Confirm `GITHUB_TOKEN` is set for local runs, or `GITHUB_TOKEN_SECRET_ARN` is set for AWS runs.
 - Confirm the token has permission to create repositories.
 - Confirm `GITHUB_OWNER` is correct.
+- Do not use an SSH private key for repository creation. GitHub SSH keys can clone and push to existing repositories, but repository creation requires the GitHub API through a token or GitHub App.
+- If an SSH private key has been pasted into chat, logs, or a ticket, revoke it immediately and create a new key.
 
 If AWS deployment fails:
 
@@ -258,3 +268,25 @@ Before using this in production:
 - Add branch protection to generated GitHub repositories.
 - Add approval workflow for production deployments.
 - Connect company standards to Confluence or an approved documentation source.
+
+## 16. AWS IAM, IRSA, And ECS Task Roles
+
+IRSA means IAM Roles for Service Accounts and is used when workloads run on Amazon EKS.
+
+This MVP is deployed on ECS Fargate because App Runner was blocked in the test account. ECS uses the same idea, but the AWS identity is attached as an ECS task role instead of an EKS service account role.
+
+Current AWS identity model:
+
+- CodeBuild image builder role builds containers in AWS, so no local Docker is required.
+- ECS task execution role pulls images from ECR.
+- ECS task role is used by the orchestrator and agents when they call AWS APIs.
+- When EKS is introduced, create one Kubernetes service account per agent and map each to a least-privilege IAM role using IRSA.
+
+Recommended future EKS/IRSA roles:
+
+- `requirement-agent-role`: read standards and write session events.
+- `provisioner-agent-role`: create GitHub repos through a token secret and write generated files.
+- `deployer-agent-role`: start CodeBuild, read logs, and update deployment state.
+- `compliance-agent-role`: read Terraform plans, run checks, and read AWS configuration evidence.
+
+Never place AWS keys or GitHub private keys directly in source code or UI input. Store tokens in AWS Secrets Manager and pass only the secret ARN to the app.

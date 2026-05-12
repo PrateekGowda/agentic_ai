@@ -60,7 +60,6 @@ resource "aws_dynamodb_table" "sessions" {
 resource "aws_cloudwatch_log_group" "orchestrator" {
   name              = "/agentcore-deployer/${var.environment}/orchestrator"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.platform.arn
 }
 
 resource "aws_ecr_repository" "backend" {
@@ -395,6 +394,7 @@ resource "aws_apprunner_service" "backend" {
           APP_ENV                           = var.environment
           AWS_REGION                        = var.region
           GITHUB_OWNER                      = var.github_owner
+          GITHUB_TOKEN_SECRET_ARN           = var.github_token_secret_arn
           COMPANY_STANDARDS_PATH            = "/app/samples/company-standards.md"
           AGENTCORE_REQUIREMENT_RUNTIME_ARN = ""
           AGENTCORE_PROVISIONER_RUNTIME_ARN = ""
@@ -438,6 +438,195 @@ resource "aws_apprunner_service" "web" {
     cpu    = "1024"
     memory = "2048"
   }
+}
+
+resource "aws_security_group" "ecs_app" {
+  count       = var.deploy_ecs ? 1 : 0
+  name        = "agentcore-deployer-${var.environment}-ecs-app"
+  description = "Allow public test access to AgentCore deployer UI and API"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "Web UI"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Backend API"
+    from_port   = 8000
+    to_port     = 8000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_ecs_cluster" "app" {
+  count = var.deploy_ecs ? 1 : 0
+  name  = "agentcore-deployer-${var.environment}"
+}
+
+resource "aws_iam_role" "ecs_task_execution" {
+  count = var.deploy_ecs ? 1 : 0
+  name  = "agentcore-deployer-${var.environment}-ecs-execution"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
+  count      = var.deploy_ecs ? 1 : 0
+  role       = aws_iam_role.ecs_task_execution[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "ecs_task" {
+  count = var.deploy_ecs ? 1 : 0
+  name  = "agentcore-deployer-${var.environment}-ecs-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task" {
+  count = var.deploy_ecs ? 1 : 0
+  name  = "agentcore-deployer-${var.environment}-ecs-task"
+  role  = aws_iam_role.ecs_task[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sts:GetCallerIdentity",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "secretsmanager:GetSecretValue",
+          "bedrock-agentcore:*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_ecs_task_definition" "app" {
+  count                    = var.deploy_ecs ? 1 : 0
+  family                   = "agentcore-deployer-${var.environment}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "1024"
+  memory                   = "2048"
+  execution_role_arn       = aws_iam_role.ecs_task_execution[0].arn
+  task_role_arn            = aws_iam_role.ecs_task[0].arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "backend"
+      image     = "${aws_ecr_repository.backend.repository_url}:${var.image_tag}"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 8000
+          hostPort      = 8000
+          protocol      = "tcp"
+        }
+      ]
+      environment = [
+        { name = "APP_ENV", value = var.environment },
+        { name = "AWS_REGION", value = var.region },
+        { name = "GITHUB_OWNER", value = var.github_owner },
+        { name = "GITHUB_TOKEN_SECRET_ARN", value = var.github_token_secret_arn },
+        { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.orchestrator.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "backend"
+        }
+      }
+    },
+    {
+      name      = "web"
+      image     = "${aws_ecr_repository.web.repository_url}:${var.image_tag}"
+      essential = true
+      dependsOn = [
+        {
+          containerName = "backend"
+          condition     = "START"
+        }
+      ]
+      portMappings = [
+        {
+          containerPort = 3000
+          hostPort      = 3000
+          protocol      = "tcp"
+        }
+      ]
+      environment = [
+        { name = "ORCHESTRATOR_BASE_URL", value = "http://127.0.0.1:8000" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.orchestrator.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "web"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "app" {
+  count           = var.deploy_ecs ? 1 : 0
+  name            = "agentcore-deployer-${var.environment}"
+  cluster         = aws_ecs_cluster.app[0].id
+  task_definition = aws_ecs_task_definition.app[0].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    assign_public_ip = true
+    security_groups  = [aws_security_group.ecs_app[0].id]
+    subnets          = data.aws_subnets.default.ids
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.ecs_task_execution
+  ]
 }
 
 # AgentCore runtime resources are intentionally isolated behind this module boundary.
