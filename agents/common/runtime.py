@@ -1,10 +1,11 @@
 """HTTP runtime entrypoint for Amazon Bedrock AgentCore Runtime."""
 
-import json
 import os
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
 
 from compliance_agent import run_compliance_checks
 from deployer_agent import run_deployment_step
@@ -18,42 +19,26 @@ AGENTS = {
     "compliance": run_compliance_checks,
 }
 
+app = FastAPI(title="AgentCore Deployer Agent Runtime")
 
-class AgentRuntimeHandler(BaseHTTPRequestHandler):
-    def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def do_GET(self) -> None:
-        if self.path != "/ping":
-            self._write_json(404, {"status": "not_found"})
-            return
-        self._write_json(200, {"status": "Healthy", "time_of_last_update": int(time.time())})
+@app.get("/ping")
+def ping() -> dict[str, Any]:
+    return {"status": "Healthy", "time_of_last_update": int(time.time())}
 
-    def do_POST(self) -> None:
-        if self.path != "/invocations":
-            self._write_json(404, {"status": "not_found"})
-            return
 
-        agent_name = os.getenv("AGENT_NAME", "requirements")
-        agent = AGENTS.get(agent_name)
-        if not agent:
-            self._write_json(400, {"message": f"Unknown AGENT_NAME: {agent_name}", "data": {}})
-            return
-
-        length = int(self.headers.get("Content-Length", "0"))
-        raw_body = self.rfile.read(length).decode("utf-8") if length else "{}"
-        request = json.loads(raw_body or "{}")
-        payload = request.get("input", request)
-        self._write_json(200, agent(payload))
+@app.post("/invocations")
+def invoke(request: dict[str, Any]) -> dict[str, Any]:
+    agent_name = os.getenv("AGENT_NAME", "requirements")
+    agent = AGENTS.get(agent_name)
+    if not agent:
+        raise HTTPException(status_code=400, detail=f"Unknown AGENT_NAME: {agent_name}")
+    payload = request.get("input", request)
+    return agent(payload)
 
 
 def main() -> None:
-    HTTPServer(("0.0.0.0", 8080), AgentRuntimeHandler).serve_forever()
+    uvicorn.run(app, host="0.0.0.0", port=8080)
 
 
 if __name__ == "__main__":
