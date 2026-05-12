@@ -1,0 +1,70 @@
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+resource "aws_security_group" "httpd" {
+  name        = "${name}-${environment}-httpd"
+  description = "Allow HTTP access for the generated EC2 HTTPD test instance"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${name}-${environment}-httpd-sg"
+    Environment = "${environment}"
+    Owner       = "${owner}"
+    CostCenter  = "${cost_center}"
+    ManagedBy   = "agentcore-multi-agent-deployer"
+  }
+}
+
+resource "aws_instance" "httpd" {
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.micro"
+  vpc_security_group_ids      = [aws_security_group.httpd.id]
+  associate_public_ip_address = true
+
+  user_data = <<-USERDATA
+    #!/bin/bash
+    set -eux
+    dnf install -y httpd
+    systemctl enable --now httpd
+    echo "Hello from ${name} ${environment}" > /var/www/html/index.html
+  USERDATA
+
+  tags = {
+    Name        = "${name}-${environment}-httpd"
+    Environment = "${environment}"
+    Owner       = "${owner}"
+    CostCenter  = "${cost_center}"
+    ManagedBy   = "agentcore-multi-agent-deployer"
+  }
+}
+
+output "http_url" {
+  value = "http://$${aws_instance.httpd.public_ip}"
+}

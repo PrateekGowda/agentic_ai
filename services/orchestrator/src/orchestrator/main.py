@@ -30,6 +30,26 @@ async def run_session_workflow(session_id: str, request: RequirementMessage) -> 
     store.save(updated)
 
 
+async def auto_deploy_after_delay(session_id: str, delay_seconds: int) -> None:
+    await asyncio.sleep(delay_seconds)
+    session = store.get(session_id)
+    if session.status != DeploymentStatus.awaiting_approval or session.resources.get("approval_mode") == "manual":
+        return
+    session.approved = True
+    session.resources["auto_deploy_started"] = True
+    session.add_event(
+        DeploymentEvent(
+            session_id=session.id,
+            agent="deployer",
+            severity="info",
+            status=DeploymentStatus.deploying,
+            message="No approval response was received during the wait window. Auto-deployment is starting.",
+        )
+    )
+    updated = await workflow().deploy(session)
+    store.save(updated)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -61,10 +81,16 @@ async def gather_requirements(session_id: str, request: RequirementMessage) -> d
 
 
 @app.post("/sessions/{session_id}/chat")
-async def chat(session_id: str, request: RequirementMessage) -> dict[str, object]:
+async def chat(session_id: str, request: RequirementMessage, background_tasks: BackgroundTasks) -> dict[str, object]:
     session = store.get(session_id)
     updated = await workflow().chat(session, request)
-    return store.save(updated).model_dump(mode="json")
+    saved = store.save(updated)
+    delay = saved.resources.get("auto_deploy_after_seconds")
+    if delay and not saved.resources.get("auto_deploy_scheduled"):
+        saved.resources["auto_deploy_scheduled"] = True
+        store.save(saved)
+        background_tasks.add_task(auto_deploy_after_delay, session_id, int(delay))
+    return saved.model_dump(mode="json")
 
 
 @app.post("/sessions/{session_id}/github-token")

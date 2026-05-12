@@ -1,6 +1,11 @@
 import sys
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
+
+from github import GithubException
 
 from orchestrator.agentcore import AgentCoreRuntimeClient
 from orchestrator.aws_resources import Ec2HttpdManager, S3BucketManager
@@ -100,31 +105,69 @@ class DeploymentWorkflow:
 
         result = await self.provisioner.invoke({"spec": session.spec.model_dump()})
         data = result["data"]
-        github = self._github(session)
-        repo = github.create_repository(data["repo_name"], private=data["private"])
-        session.repository_url = repo.url
         files = dict(data["files"])
-        template_root = (
-            Path(__file__).resolve().parents[4]
-            / "templates"
-            / "terraform"
-            / session.spec.workload_type
-        )
-        if template_root.exists():
-            for path, content in render_terraform(session.spec.model_dump(), template_root).items():
-                files[f"terraform/{path}"] = content
+        self._merge_terraform_templates(session.spec, files)
+        validation_errors = self._validate_generated_files(session.spec, files)
+        if validation_errors:
+            files = self._repair_generated_files(session.spec, files)
+            validation_errors = self._validate_generated_files(session.spec, files)
 
+        if validation_errors:
+            message = "Generated Terraform failed validation, so I did not push it to GitHub."
+            self._add_chat_message(session, "assistant", f"{message} Issues: {'; '.join(validation_errors)}")
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="provisioner",
+                    severity="error",
+                    status=DeploymentStatus.failed,
+                    message=message,
+                    details={"validation_errors": validation_errors, "files": sorted(files.keys())},
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        github = self._github(session)
+        try:
+            repo = github.create_repository(data["repo_name"], private=data["private"])
+        except GithubException as exc:
+            message = self._github_error_message(exc)
+            self._add_chat_message(session, "assistant", message)
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="provisioner",
+                    severity="error",
+                    status=DeploymentStatus.failed,
+                    message=message,
+                    details={
+                        "github_status": exc.status,
+                        "github_owner": self.settings.github_owner,
+                        "repo_name": data.get("repo_name"),
+                    },
+                )
+            )
+            self.persist_state(session)
+            return session
+        session.repository_url = repo.url
+
+        changed_files = []
         for path, content in files.items():
-            github.upsert_file(
+            changed = github.upsert_file(
                 repo_full_name=repo.full_name,
                 path=path,
                 content=content,
                 message=f"Generate {path}",
             )
+            if changed:
+                changed_files.append(path)
 
         github_verification = None
+        terraform_verification = None
         if github.is_configured:
             github_verification = github.read_file(repo.full_name, "README.md")
+            terraform_verification = github.read_file(repo.full_name, "terraform/main.tf")
 
         provision_message = (
             f"Created GitHub repository and committed generated infrastructure: {repo.url}"
@@ -146,12 +189,84 @@ class DeploymentWorkflow:
                 message=provision_message,
                 details={
                     "files": sorted(files.keys()),
+                    "changed_files": sorted(changed_files),
+                    "validation": "passed",
                     "github_read_verified": bool(github_verification),
+                    "terraform_read_verified": self._expected_terraform_marker(session.spec) in (terraform_verification or ""),
                 },
             )
         )
         self.persist_state(session)
         return session
+
+    def _github_error_message(self, exc: GithubException) -> str:
+        if exc.status == 403:
+            return (
+                "GitHub repo creation failed because the default token in Secrets Manager "
+                "does not have permission to create repositories. Update the secret with a "
+                "classic PAT that has `repo` scope, or a fine-grained token for the target "
+                "owner with repository creation/administration access, then send the request again."
+            )
+        return f"GitHub repo creation failed with status {exc.status}: {exc.data.get('message', str(exc))}"
+
+    def _merge_terraform_templates(self, spec: DeploymentSpec, files: dict[str, str]) -> None:
+        template_root = Path(__file__).resolve().parents[4] / "templates" / "terraform" / spec.workload_type
+        if template_root.exists():
+            for path, content in render_terraform(spec.model_dump(), template_root).items():
+                files[f"terraform/{path}"] = content
+
+    def _repair_generated_files(self, spec: DeploymentSpec, files: dict[str, str]) -> dict[str, str]:
+        repaired = dict(files)
+        self._merge_terraform_templates(spec, repaired)
+        repaired.setdefault(
+            "terraform/README.md",
+            "Run `terraform init`, `terraform plan`, and `terraform apply` through the approved pipeline.\n",
+        )
+        return repaired
+
+    def _validate_generated_files(self, spec: DeploymentSpec, files: dict[str, str]) -> list[str]:
+        errors: list[str] = []
+        required = ["README.md", "ARCHITECTURE.md", "COMPLIANCE.md", "terraform/main.tf", "terraform/variables.tf", "terraform/backend.tf"]
+        for path in required:
+            if not files.get(path, "").strip():
+                errors.append(f"missing or empty {path}")
+
+        main_tf = files.get("terraform/main.tf", "")
+        marker = self._expected_terraform_marker(spec)
+        if marker and marker not in main_tf:
+            errors.append(f"terraform/main.tf does not include expected {spec.workload_type} resource marker `{marker}`")
+        unresolved = [placeholder for placeholder in ("${name}", "${region}", "${environment}", "${owner}", "${cost_center}") if placeholder in main_tf]
+        if unresolved:
+            errors.append(f"terraform/main.tf contains unresolved template variables: {', '.join(unresolved)}")
+        if main_tf.count("{") != main_tf.count("}"):
+            errors.append("terraform/main.tf has unbalanced braces")
+
+        terraform = shutil.which("terraform")
+        if terraform and not errors:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for path, content in files.items():
+                    if path.startswith("terraform/") and path.endswith(".tf"):
+                        target = root / path.removeprefix("terraform/")
+                        target.write_text(content, encoding="utf-8")
+                fmt = subprocess.run([terraform, "fmt", "-check"], cwd=root, capture_output=True, text=True, timeout=30)
+                if fmt.returncode != 0:
+                    errors.append(f"terraform fmt failed: {(fmt.stdout or fmt.stderr).strip()}")
+                init = subprocess.run([terraform, "init", "-backend=false"], cwd=root, capture_output=True, text=True, timeout=60)
+                if init.returncode == 0:
+                    validate = subprocess.run([terraform, "validate"], cwd=root, capture_output=True, text=True, timeout=60)
+                    if validate.returncode != 0:
+                        errors.append(f"terraform validate failed: {(validate.stdout or validate.stderr).strip()}")
+        return errors
+
+    def _expected_terraform_marker(self, spec: DeploymentSpec) -> str:
+        markers = {
+            "ec2-httpd": "aws_instance",
+            "s3-bucket": "aws_s3_bucket",
+            "s3-lambda-api": "aws_lambda_function",
+            "vpc-baseline": "aws_vpc",
+        }
+        return markers.get(spec.workload_type, "")
 
     async def run_compliance(self, session: DeploymentSession) -> DeploymentSession:
         if not session.spec:
@@ -203,6 +318,9 @@ class DeploymentWorkflow:
     async def chat(self, session: DeploymentSession, request: RequirementMessage) -> DeploymentSession:
         self._add_chat_message(session, "user", request.message)
         self._remember(session, "USER", request.message, {"stage": "chat"})
+        approval_mode = self._extract_approval_mode(request.message)
+        if approval_mode:
+            session.resources["approval_mode"] = approval_mode
         if self._is_approval(request.message) and session.status == DeploymentStatus.awaiting_approval:
             session.approved = True
             session.add_event(
@@ -245,15 +363,41 @@ class DeploymentWorkflow:
         self._add_chat_message(
             session,
             "assistant",
-            f"I have the requirements for `{session.spec.name}`. I am creating architecture, Terraform, and GitHub documentation now.",
+            self._implementation_plan(session.spec),
         )
         session = await self.provision(session)
+        if session.status == DeploymentStatus.failed:
+            return session
         session = await self.run_compliance(session)
         if session.status == DeploymentStatus.awaiting_approval:
-            approval_message = (
-                "Architecture, Terraform, and compliance checks are ready. "
-                "Review the GitHub links, then type `approve` to deploy."
-            )
+            mode = session.resources.get("approval_mode", "auto")
+            if mode == "skip":
+                session.approved = True
+                self._add_chat_message(session, "assistant", "Approval was skipped by request. Deployment is starting now.")
+                session.add_event(
+                    DeploymentEvent(
+                        session_id=session.id,
+                        agent="deployer",
+                        severity="info",
+                        status=DeploymentStatus.deploying,
+                        message="User requested direct deployment without approval.",
+                    )
+                )
+                session = await self.deploy(session)
+                self._add_chat_message(session, "assistant", "Deployment is complete. Review the repository, artifacts, and resource details on the right.")
+                return session
+            if mode == "manual":
+                approval_message = (
+                    "Architecture, Terraform, and compliance checks are ready. "
+                    "I will wait for approval. Type `approve` when you want to deploy."
+                )
+            else:
+                session.resources["auto_deploy_after_seconds"] = 180
+                approval_message = (
+                    "Architecture, Terraform, and compliance checks are ready. "
+                    "Review the GitHub links and type `approve` to deploy now. "
+                    "If there is no response, I will auto-deploy in about 3 minutes."
+                )
             self._add_chat_message(session, "assistant", approval_message)
             session.add_event(
                 DeploymentEvent(
@@ -261,11 +405,12 @@ class DeploymentWorkflow:
                     agent="deployer",
                     severity="info",
                     status=DeploymentStatus.awaiting_approval,
-                    message="Review the GitHub architecture and compliance details, then type 'approve' to deploy.",
+                    message=approval_message,
                     details={
                         "repository_url": session.repository_url,
                         "architecture_doc_url": session.architecture_doc_url,
                         "findings": [finding.model_dump() for finding in session.findings],
+                        "approval_mode": mode,
                     },
                 )
             )
@@ -461,6 +606,7 @@ class DeploymentWorkflow:
             r"\bproject\s+name\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
             r"\b(?:project|application|app)\s+(?:called|named)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
             r"\b(?:project|application|app)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
+            r"\b(?:ec2|server|instance)\s+(?:called|named)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
             r"\bbucket\s+name\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
             r"\bbucket\s+(?:called|named)\s+([A-Za-z][A-Za-z0-9-_]{2,})",
         ]
@@ -473,6 +619,27 @@ class DeploymentWorkflow:
 
     def _is_approval(self, message: str) -> bool:
         return message.strip().lower() in {"approve", "approved", "yes", "go", "deploy", "proceed"}
+
+    def _extract_approval_mode(self, message: str) -> str | None:
+        lower = message.lower()
+        if any(phrase in lower for phrase in ("skip approval", "no approval", "without approval", "go directly", "direct deploy", "deploy directly")):
+            return "skip"
+        if any(phrase in lower for phrase in ("wait for approval", "manual approval", "do not auto", "don't auto", "approval required")):
+            return "manual"
+        return None
+
+    def _implementation_plan(self, spec: DeploymentSpec) -> str:
+        if spec.workload_type == "ec2-httpd":
+            workload = "an EC2 instance with HTTPD, user data bootstrap, and a security group allowing HTTP on port 80"
+        elif spec.workload_type == "s3-bucket":
+            workload = "an S3 bucket with public access blocked, versioning enabled, encryption, and required tags"
+        else:
+            workload = f"a `{spec.workload_type}` workload with Terraform and company baseline controls"
+        return (
+            f"I have the requirements for `{spec.name}`. Implementation plan: create {workload} in "
+            f"`{spec.region}` for `{spec.environment}`, generate Terraform and docs, validate the code, "
+            "push only valid changes to GitHub, run compliance, then handle approval/deployment."
+        )
 
     def _missing_question(self, key: str) -> str:
         questions = {

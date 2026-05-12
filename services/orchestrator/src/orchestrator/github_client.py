@@ -51,9 +51,9 @@ class GitHubRepositoryClient:
         content: str,
         message: str,
         branch: str = "main",
-    ) -> None:
+    ) -> bool:
         if not self._token:
-            return
+            return False
 
         github = Github(self._token)
         repo = github.get_repo(repo_full_name)
@@ -61,11 +61,15 @@ class GitHubRepositoryClient:
             existing = repo.get_contents(path, ref=branch)
             if isinstance(existing, list):
                 raise ValueError(f"Expected file path, got directory: {path}")
+            if existing.decoded_content.decode("utf-8") == content:
+                return False
             repo.update_file(path, message, content, existing.sha, branch=branch)
+            return True
         except GithubException as exc:
             if exc.status != 404:
                 raise
             repo.create_file(path, message, content, branch=branch)
+            return True
 
     def read_file(self, repo_full_name: str, path: str, branch: str = "main") -> str | None:
         if not self._token:
