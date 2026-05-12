@@ -65,6 +65,7 @@ class DeploymentWorkflow:
         session: DeploymentSession,
         request: RequirementMessage,
     ) -> DeploymentSession:
+        self._feedback(session, "requirements", "Analyzing chat context and required project fields.")
         result = await self.requirements.invoke(request.model_dump())
         data = result.get("data", {})
         if not data.get("complete"):
@@ -79,10 +80,12 @@ class DeploymentWorkflow:
                     message=result["message"],
                 )
             )
+            session.resources["pending_answer_key"] = data.get("questions", [{}])[0].get("id")
             self._remember(session, "ASSISTANT", result["message"], {"stage": "requirements"})
             return session
 
         session.spec = DeploymentSpec(**data["spec"])
+        session.resources.pop("pending_answer_key", None)
         session.customization_questions = []
         session.resources["chat_answers"] = session.spec.model_dump(mode="json")
         session.add_event(
@@ -102,6 +105,7 @@ class DeploymentWorkflow:
         if not session.spec:
             raise ValueError("Requirements must be completed before provisioning.")
 
+        self._feedback(session, "provisioner", "Generating Terraform with LLM assistance and deterministic fallback.")
         result = await self.provisioner.invoke({"spec": session.spec.model_dump()})
         data = result["data"]
         files = dict(data["files"])
@@ -291,6 +295,7 @@ class DeploymentWorkflow:
         if not session.spec:
             raise ValueError("Requirements must be completed before compliance checks.")
 
+        self._feedback(session, "compliance", "Reviewing generated project context against security and tagging baseline.")
         result = await self.compliance.invoke({"spec": session.spec.model_dump()})
         findings = result["data"]["findings"]
         session.findings = [ComplianceFinding(**finding) for finding in findings]
@@ -309,6 +314,7 @@ class DeploymentWorkflow:
         return session
 
     async def deploy(self, session: DeploymentSession) -> DeploymentSession:
+        self._feedback(session, "deployer", "Applying the approved deployment plan and tracking created resources.")
         result = await self.deployer.invoke(
             {
                 "approved": session.approved,
@@ -359,12 +365,20 @@ class DeploymentWorkflow:
 
         answers = dict(session.resources.get("chat_answers", {}))
         self._merge_answers(answers, request.answers)
-        self._merge_answers(answers, self._extract_chat_answers(request.message))
+        extracted = self._extract_chat_answers(request.message)
+        self._apply_pending_answer(session, answers, request.message, extracted)
+        self._merge_answers(answers, extracted)
         session.resources["chat_answers"] = answers
+
+        if session.spec and self._is_update_request(request.message, extracted):
+            session = await self._update_existing_project(session, answers, request.message)
+            return session
+
         missing = [key for key in ("name", "description", "owner", "cost_center") if not answers.get(key)]
         if missing:
             question = self._missing_question(missing[0])
             self._add_chat_message(session, "assistant", question)
+            session.resources["pending_answer_key"] = missing[0]
             session.add_event(
                 DeploymentEvent(
                     session_id=session.id,
@@ -436,6 +450,46 @@ class DeploymentWorkflow:
                 )
             )
             self.persist_state(session)
+        return session
+
+    async def _update_existing_project(
+        self,
+        session: DeploymentSession,
+        answers: dict[str, str],
+        message: str,
+    ) -> DeploymentSession:
+        if not session.spec:
+            return session
+        spec_data = session.spec.model_dump(mode="json")
+        for key in ("description", "region", "environment", "owner", "cost_center", "workload_type"):
+            if answers.get(key):
+                spec_data[key] = answers[key]
+        tags = dict(spec_data.get("tags", {}))
+        if instance_type := answers.get("instance_type"):
+            tags["InstanceType"] = instance_type
+        spec_data["tags"] = tags
+        session.spec = DeploymentSpec(**spec_data)
+        session.resources["chat_answers"] = {**answers, **session.spec.model_dump(mode="json")}
+        self._add_chat_message(
+            session,
+            "assistant",
+            "I understood this as an update to the existing project. I will regenerate Terraform, validate the diff, update GitHub, then rerun compliance.",
+        )
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="requirements",
+                severity="info",
+                status=DeploymentStatus.customizing,
+                message="Existing project update request accepted from chat.",
+                details={"message": message, "updates": answers},
+            )
+        )
+        session = await self.provision(session)
+        if session.status == DeploymentStatus.failed:
+            return session
+        session = await self.run_compliance(session)
+        self._add_chat_message(session, "assistant", "Update is ready. Review the GitHub diff and type `approve` to deploy the updated project.")
         return session
 
     async def run_automatic(
@@ -584,6 +638,11 @@ class DeploymentWorkflow:
         messages.append({"role": role, "content": content})
         session.resources["chat_messages"] = messages[-30:]
 
+    def _feedback(self, session: DeploymentSession, agent: str, message: str) -> None:
+        feedback = list(session.resources.get("agent_feedback", []))
+        feedback.append({"agent": agent, "message": message})
+        session.resources["agent_feedback"] = feedback[-50:]
+
     def _merge_answers(self, answers: dict[str, str], updates: dict[str, str]) -> None:
         for key, value in updates.items():
             if not value:
@@ -617,6 +676,11 @@ class DeploymentWorkflow:
         region = re.search(r"\b[a-z]{2}-[a-z]+-\d\b", message)
         if region:
             answers["region"] = region.group(0)
+        instance_type = re.search(r"\b(?:instance\s*type|size)\s*(?:is|:|-)?\s*([a-z][0-9][a-z]?\.[a-z0-9]+)\b", message, re.I)
+        if not instance_type:
+            instance_type = re.search(r"\b(t[234][a-z]?\.[a-z0-9]+|m[567][a-z]?\.[a-z0-9]+|c[567][a-z]?\.[a-z0-9]+)\b", message, re.I)
+        if instance_type:
+            answers["instance_type"] = instance_type.group(1).lower()
         env = re.search(r"\b(dev|test|stage|prod)\b", message, re.I)
         if env:
             answers["environment"] = env.group(1).lower()
@@ -632,6 +696,26 @@ class DeploymentWorkflow:
         elif "s3 bucket" in lower or "bucket" in lower:
             answers["workload_type"] = "s3-bucket"
         return answers
+
+    def _apply_pending_answer(
+        self,
+        session: DeploymentSession,
+        answers: dict[str, str],
+        message: str,
+        extracted: dict[str, str],
+    ) -> None:
+        pending = session.resources.get("pending_answer_key")
+        value = message.strip()
+        if not pending or not value or extracted.get(str(pending)):
+            return
+        if len(value.split()) <= 6:
+            answers[str(pending)] = value
+            session.resources.pop("pending_answer_key", None)
+
+    def _is_update_request(self, message: str, extracted: dict[str, str]) -> bool:
+        lower = message.lower()
+        update_words = ("update", "change", "modify", "set ", "increase", "decrease", "resize", "make it")
+        return any(word in lower for word in update_words) or bool(extracted.get("instance_type"))
 
     def _extract_project_name(self, message: str) -> str | None:
         patterns = [

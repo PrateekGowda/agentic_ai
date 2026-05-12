@@ -545,6 +545,8 @@ resource "aws_apprunner_service" "backend" {
           GITHUB_OWNER                      = var.github_owner
           GITHUB_TOKEN_SECRET_ARN           = var.github_token_secret_arn
           REFERENCE_LIBRARY_REPO            = var.reference_library_repo
+          BEDROCK_MODEL_ID                  = var.bedrock_model_id
+          AGENT_LLM_ENABLED                 = tostring(var.agent_llm_enabled)
           COMPANY_STANDARDS_PATH            = "/app/samples/company-standards.md"
           AGENTCORE_REQUIREMENT_RUNTIME_ARN = ""
           AGENTCORE_PROVISIONER_RUNTIME_ARN = ""
@@ -714,6 +716,8 @@ resource "aws_ecs_task_definition" "app" {
         { name = "GITHUB_OWNER", value = var.github_owner },
         { name = "GITHUB_TOKEN_SECRET_ARN", value = var.github_token_secret_arn },
         { name = "REFERENCE_LIBRARY_REPO", value = var.reference_library_repo },
+        { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+        { name = "AGENT_LLM_ENABLED", value = tostring(var.agent_llm_enabled) },
         { name = "PROJECT_STATE_BUCKET", value = "hack-aib-tf-backend" },
         { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" },
         { name = "AGENTCORE_REQUIREMENT_RUNTIME_ARN", value = var.agentcore_requirement_runtime_arn },

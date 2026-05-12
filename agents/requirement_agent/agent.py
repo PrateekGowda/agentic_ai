@@ -1,6 +1,8 @@
 from typing import Any
 import re
 
+from common.llm import ask_llm_json
+
 REQUIRED_FIELDS = {
     "name": "Application or platform name",
     "description": "Short description",
@@ -13,6 +15,8 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
     answers = dict(payload.get("answers", {}))
     original_message = str(payload.get("message", ""))
     message = original_message.lower()
+    llm_answers = _extract_answers_with_llm(original_message, answers)
+    answers.update({key: value for key, value in llm_answers.items() if value and not answers.get(key)})
     answers.update({key: value for key, value in _extract_answers(original_message).items() if not answers.get(key)})
     missing = [label for key, label in REQUIRED_FIELDS.items() if not answers.get(key)]
 
@@ -60,6 +64,23 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
         "message": "Requirements are complete and ready for Terraform generation.",
         "data": {"complete": True, "spec": spec},
     }
+
+
+def _extract_answers_with_llm(message: str, existing: dict[str, Any]) -> dict[str, str]:
+    result = ask_llm_json(
+        "You extract infrastructure requirements from natural language. Return only JSON.",
+        (
+            "Extract fields for an AWS Terraform request. Valid workload_type values are "
+            "ec2-httpd, s3-bucket, s3-lambda-api, vpc-baseline. Include only fields you are confident about. "
+            "Fields: name, description, owner, cost_center, region, environment, workload_type, "
+            "github_visibility, compliance_profile.\n"
+            f"Existing answers: {existing}\n"
+            f"User message: {message}"
+        ),
+    )
+    if not result:
+        return {}
+    return {str(key): str(value) for key, value in result.items() if value is not None}
 
 
 def _infer_workload(message: str) -> str:

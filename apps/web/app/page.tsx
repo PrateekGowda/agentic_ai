@@ -21,7 +21,6 @@ export default function Home() {
   const [chatMessage, setChatMessage] = useState(
     "Create an S3 bucket",
   );
-  const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const chatMessages = (session?.resources?.chat_messages as { role: string; content: string }[] | undefined) ?? [];
@@ -66,18 +65,6 @@ export default function Home() {
     return current;
   }
 
-  async function saveGithubToken() {
-    const current = await ensureSession();
-    const updated = await call<DeploymentSession>(`/sessions/${current.id}/github-token`, {
-      method: "POST",
-      body: JSON.stringify({ token: githubToken }),
-    });
-    setGithubToken("");
-    setSession(updated);
-    setNotice("GitHub token saved. The provisioner can now create, update, and read the project repository.");
-    await refreshProjects();
-  }
-
   async function sendChat() {
     const current = await ensureSession();
     const updated = await call<DeploymentSession>(`/sessions/${current.id}/chat`, {
@@ -112,6 +99,9 @@ export default function Home() {
           <span className="status">{session?.status ?? "not_started"}</span>
           <a className="button secondary" href="/projects">
             Existing Projects Page
+          </a>
+          <a className="button secondary" href="/admin">
+            Admin
           </a>
         </div>
         <p className="muted" style={{ maxWidth: 860 }}>
@@ -172,23 +162,6 @@ export default function Home() {
       <div className="grid">
         <section className="stack">
           <section className="panel stack">
-            <h2>GitHub Access</h2>
-            <label className="field">
-              GitHub API token
-              <input
-                type="password"
-                value={githubToken}
-                placeholder="Paste a fine-scoped token for repository create/read/update"
-                onChange={(event) => setGithubToken(event.target.value)}
-              />
-            </label>
-            <button className="button secondary" onClick={saveGithubToken} disabled={!githubToken || busy}>
-              Save Token For Session
-            </button>
-            <p className="muted">The token is held only for this backend session and is not returned by the API.</p>
-          </section>
-
-          <section className="panel stack">
             <h2>Step-By-Step Process</h2>
             {processSteps.map((step) => (
               <div key={step.label} className={`event ${stepState(step, session?.events ?? []) === "done" ? "success" : "info"}`}>
@@ -243,15 +216,9 @@ export default function Home() {
           <section className="panel stack">
             <h2>Execution Logs</h2>
             {session?.events.length ? (
-              session.events.map((event) => (
-                <div key={event.id} className={`event ${event.severity}`}>
-                  <strong>{new Date(event.timestamp).toLocaleTimeString()} - {event.agent} - {event.status}</strong>
-                  <p>{event.message}</p>
-                  {Object.keys(event.details ?? {}).length ? (
-                    <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{JSON.stringify(event.details, null, 2)}</pre>
-                  ) : null}
-                </div>
-              ))
+              <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                {session.events.map(formatTerminalEvent).join("\n")}
+              </pre>
             ) : (
               <p className="muted">Start chatting to see agent activity.</p>
             )}
@@ -260,4 +227,9 @@ export default function Home() {
       </div>
     </main>
   );
+}
+
+function formatTerminalEvent(event: DeploymentEvent) {
+  const details = Object.keys(event.details ?? {}).length ? `\n${JSON.stringify(event.details, null, 2)}` : "";
+  return `[${new Date(event.timestamp).toLocaleTimeString()}] ${event.agent} ${event.status} ${event.severity}\n$ ${event.message}${details}`;
 }

@@ -1,5 +1,7 @@
 from typing import Any
 
+from common.llm import ask_llm_json
+
 
 def _slug(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "-" for char in value).strip("-")
@@ -11,7 +13,7 @@ def provision_repository_payload(payload: dict[str, Any]) -> dict[str, Any]:
     title = spec["name"]
     environment = spec["environment"]
     workload = spec["workload_type"]
-    terraform_files = _generate_terraform(spec)
+    terraform_files = _generate_terraform_with_llm(spec) or _generate_terraform(spec)
     reference_files = _generate_reference_library(spec)
     return {
         "message": "The Provisioner Agent generated Terraform source and documentation.",
@@ -80,6 +82,27 @@ def _generate_terraform(spec: dict[str, Any]) -> dict[str, str]:
     if workload == "s3-bucket":
         return _s3_bucket_project_terraform(spec)
     return _s3_lambda_api_project_terraform(spec)
+
+
+def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
+    result = ask_llm_json(
+        "You are a senior AWS Terraform engineer. Return only JSON with Terraform file contents.",
+        (
+            "Generate secure Terraform for this AWS infrastructure request. "
+            "Return JSON shaped as {\"files\":{\"versions.tf\":\"...\",\"variables.tf\":\"...\","
+            "\"backend.tf\":\"...\",\"main.tf\":\"...\"}}. Use the S3 backend bucket "
+            "hack-aib-tf-backend. Do not include secrets or private keys. For EC2, prefer SSM Session "
+            "Manager and include aws_instance. For S3, include public access block, versioning, and encryption. "
+            f"Request spec: {spec}"
+        ),
+    )
+    files = result.get("files") if result else None
+    if not isinstance(files, dict):
+        return None
+    expected = {"versions.tf", "variables.tf", "backend.tf", "main.tf"}
+    if not expected.issubset(files):
+        return None
+    return {str(path): str(content) for path, content in files.items() if path in expected}
 
 
 def _common_versions_tf() -> str:
@@ -151,6 +174,7 @@ def _backend_tf(spec: dict[str, Any]) -> str:
 
 def _ec2_httpd_project_terraform(spec: dict[str, Any]) -> dict[str, str]:
     name = _slug(spec["name"])
+    instance_type = spec.get("tags", {}).get("InstanceType", "t3.micro")
     main_tf = f"""data "aws_ami" "amazon_linux" {{
   most_recent = true
   owners      = ["amazon"]
@@ -221,7 +245,7 @@ resource "aws_security_group" "httpd" {{
 
 resource "aws_instance" "httpd" {{
   ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t3.micro"
+  instance_type               = "{instance_type}"
   subnet_id                   = data.aws_subnets.default.ids[0]
   vpc_security_group_ids      = [aws_security_group.httpd.id]
   iam_instance_profile        = aws_iam_instance_profile.ssm.name

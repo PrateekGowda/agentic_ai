@@ -51,6 +51,9 @@ export default function ProjectsPage() {
           <a className="button secondary" href="/">
             New Request
           </a>
+          <a className="button secondary" href="/admin">
+            Admin
+          </a>
           <button className="button secondary" onClick={refresh} disabled={busy}>
             Refresh
           </button>
@@ -63,14 +66,18 @@ export default function ProjectsPage() {
           <h2>Projects</h2>
           {projects.length ? (
             projects.map((project) => (
-              <button
-                key={project.id}
-                className="button secondary"
-                style={{ textAlign: "left" }}
-                onClick={() => setSelected(project)}
-              >
-                {(project.spec?.name ?? project.id.slice(0, 8))} - {project.status}
-              </button>
+              <div key={project.id} className="event">
+                <button
+                  className="button secondary"
+                  style={{ textAlign: "left" }}
+                  onClick={() => setSelected(project)}
+                >
+                  {(project.spec?.name ?? project.id.slice(0, 8))} - {project.status}
+                </button>
+                <button className="button secondary" onClick={() => destroyProject(project)} disabled={busy}>
+                  Destroy
+                </button>
+              </div>
             ))
           ) : (
             <p className="muted">No projects found in the current running service memory.</p>
@@ -100,15 +107,9 @@ export default function ProjectsPage() {
           <section className="panel stack">
             <h2>Execution Logs</h2>
             {selected?.events?.length ? (
-              selected.events.map((event) => (
-                <div key={event.id} className={`event ${event.severity}`}>
-                  <strong>{new Date(event.timestamp).toLocaleTimeString()} - {event.agent} - {event.status}</strong>
-                  <p>{event.message}</p>
-                  {Object.keys(event.details ?? {}).length ? (
-                    <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{JSON.stringify(event.details, null, 2)}</pre>
-                  ) : null}
-                </div>
-              ))
+              <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                {selected.events.map(formatTerminalEvent).join("\n")}
+              </pre>
             ) : (
               <p className="muted">No logs for the selected project.</p>
             )}
@@ -117,4 +118,9 @@ export default function ProjectsPage() {
       </div>
     </main>
   );
+}
+
+function formatTerminalEvent(event: DeploymentSession["events"][number]) {
+  const details = Object.keys(event.details ?? {}).length ? `\n${JSON.stringify(event.details, null, 2)}` : "";
+  return `[${new Date(event.timestamp).toLocaleTimeString()}] ${event.agent} ${event.status} ${event.severity}\n$ ${event.message}${details}`;
 }

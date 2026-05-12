@@ -26,6 +26,18 @@ variable "reference_library_repo" {
   default     = "iac-codebase-agentic-ai"
 }
 
+variable "bedrock_model_id" {
+  type        = string
+  description = "Bedrock model ID used by LLM-powered agents."
+  default     = "amazon.nova-lite-v1:0"
+}
+
+variable "agent_llm_enabled" {
+  type        = bool
+  description = "Enable Bedrock LLM calls inside AgentCore agent runtimes."
+  default     = true
+}
+
 variable "agentcore_runtime_image_uri" {
   type        = string
   description = "Container image URI used by AgentCore runtimes."
