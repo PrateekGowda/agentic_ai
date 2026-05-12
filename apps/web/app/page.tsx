@@ -24,6 +24,7 @@ export default function Home() {
   const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const chatMessages = (session?.resources?.chat_messages as { role: string; content: string }[] | undefined) ?? [];
 
   useEffect(() => {
     refreshProjects().catch(() => undefined);
@@ -85,6 +86,7 @@ export default function Home() {
     });
     setSession(updated);
     setNotice("Chat sent. If approval is needed, type approve after reviewing the GitHub architecture and logs.");
+    setChatMessage("");
     await refreshProjects();
   }
 
@@ -120,9 +122,32 @@ export default function Home() {
 
       <section className="panel stack" style={{ marginBottom: 24 }}>
         <h2>Chatbot</h2>
+        <div className="chatWindow">
+          {chatMessages.length ? (
+            chatMessages.map((message, index) => (
+              <div key={`${message.role}-${index}`} className={`chatBubble ${message.role === "user" ? "user" : "assistant"}`}>
+                <strong>{message.role === "user" ? "You" : "Agent"}</strong>
+                <p>{message.content}</p>
+              </div>
+            ))
+          ) : (
+            <div className="chatBubble assistant">
+              <strong>Agent</strong>
+              <p>
+                Tell me what to build. If details are missing, I will ask here. You can answer naturally, for example:
+                `owner platform team`, `cc1001`, or `project demo-s3`.
+              </p>
+            </div>
+          )}
+        </div>
         <label className="field">
           Tell the agents what to build
-          <textarea value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} rows={5} />
+          <textarea
+            value={chatMessage}
+            onChange={(event) => setChatMessage(event.target.value)}
+            rows={4}
+            placeholder="Create an S3 bucket in us-east-1 dev, project demo-s3, owner platform team, cc1001"
+          />
         </label>
         <div className="row">
           <button className="button secondary" onClick={ensureSession} disabled={busy}>

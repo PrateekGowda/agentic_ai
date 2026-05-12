@@ -126,3 +126,37 @@ button {
 .event.error {
   border-color: var(--error);
 }
+
+.chatWindow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f9fafb;
+  padding: 14px;
+}
+
+.chatBubble {
+  max-width: 82%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: white;
+}
+
+.chatBubble p {
+  margin: 6px 0 0;
+}
+
+.chatBubble.user {
+  align-self: flex-end;
+  background: #dbeafe;
+  border-color: #bfdbfe;
+}
+
+.chatBubble.assistant {
+  align-self: flex-start;
+}

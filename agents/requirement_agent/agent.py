@@ -72,24 +72,43 @@ def _infer_workload(message: str) -> str:
 
 def _extract_answers(message: str) -> dict[str, str]:
     answers: dict[str, str] = {}
+    lower = message.lower()
     email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", message)
     if email:
         answers["owner"] = email.group(0)
-    cost_center = re.search(r"(?:cost\s*center|cost_center|cc)[:\s-]*([A-Za-z]{0,4}-?\d{3,})", message, re.I)
+    else:
+        owner = re.search(
+            r"(?:owner|owned by|team|application owner)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9 ._-]{1,60})",
+            message,
+            re.I,
+        )
+        if owner:
+            answers["owner"] = owner.group(1).strip(" .")
+    cost_center = re.search(
+        r"(?:cost\s*cent(?:er|re)|cost_center|charge\s*code|billing\s*code|cc)\s*(?:is|:|-)?\s*([A-Za-z]{0,6}-?\s*\d{2,})",
+        message,
+        re.I,
+    )
     if cost_center:
-        answers["cost_center"] = cost_center.group(1).upper()
+        answers["cost_center"] = cost_center.group(1).replace(" ", "").upper()
+    elif re.fullmatch(r"\s*(?:cc)?\s*\d{3,}\s*", message, re.I):
+        answers["cost_center"] = message.strip().upper().replace(" ", "")
     region = re.search(r"\b[a-z]{2}-[a-z]+-\d\b", message)
     if region:
         answers["region"] = region.group(0)
     environment = re.search(r"\b(dev|test|stage|prod)\b", message, re.I)
     if environment:
         answers["environment"] = environment.group(1).lower()
-    name = re.search(r"(?:project|application|app|bucket)\s+name\s*(?:is|:)?\s*([A-Za-z0-9-_]+)", message, re.I)
+    name = re.search(
+        r"(?:project|application|app|bucket)\s*(?:name|called|named)?\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
+        message,
+        re.I,
+    )
     if name:
         answers["name"] = name.group(1)
-    elif "s3" in message.lower() and "bucket" in message.lower():
+    elif "s3" in lower and "bucket" in lower:
         answers["name"] = "chat-s3-bucket"
-    if message.strip():
+    if message.strip() and len(message.split()) > 3:
         answers["description"] = message.strip()[:500]
-    answers["workload_type"] = _infer_workload(message.lower())
+    answers["workload_type"] = _infer_workload(lower)
     return answers

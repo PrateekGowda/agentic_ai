@@ -201,6 +201,7 @@ class DeploymentWorkflow:
         return session
 
     async def chat(self, session: DeploymentSession, request: RequirementMessage) -> DeploymentSession:
+        self._add_chat_message(session, "user", request.message)
         self._remember(session, "USER", request.message, {"stage": "chat"})
         if self._is_approval(request.message) and session.status == DeploymentStatus.awaiting_approval:
             session.approved = True
@@ -213,15 +214,18 @@ class DeploymentWorkflow:
                     message="Approval received in chat. Deployment is starting.",
                 )
             )
-            return await self.deploy(session)
+            session = await self.deploy(session)
+            self._add_chat_message(session, "assistant", "Deployment is complete. Review the repository, artifacts, and resource details on the right.")
+            return session
 
         answers = dict(session.resources.get("chat_answers", {}))
-        answers.update({key: value for key, value in request.answers.items() if value})
-        answers.update({key: value for key, value in self._extract_chat_answers(request.message).items() if value})
+        self._merge_answers(answers, request.answers)
+        self._merge_answers(answers, self._extract_chat_answers(request.message))
         session.resources["chat_answers"] = answers
         missing = [key for key in ("name", "description", "owner", "cost_center") if not answers.get(key)]
         if missing:
             question = self._missing_question(missing[0])
+            self._add_chat_message(session, "assistant", question)
             session.add_event(
                 DeploymentEvent(
                     session_id=session.id,
@@ -238,9 +242,19 @@ class DeploymentWorkflow:
         session = await self.gather_requirements(session, RequirementMessage(message=request.message, answers=answers))
         if not session.spec:
             return session
+        self._add_chat_message(
+            session,
+            "assistant",
+            f"I have the requirements for `{session.spec.name}`. I am creating architecture, Terraform, and GitHub documentation now.",
+        )
         session = await self.provision(session)
         session = await self.run_compliance(session)
         if session.status == DeploymentStatus.awaiting_approval:
+            approval_message = (
+                "Architecture, Terraform, and compliance checks are ready. "
+                "Review the GitHub links, then type `approve` to deploy."
+            )
+            self._add_chat_message(session, "assistant", approval_message)
             session.add_event(
                 DeploymentEvent(
                     session_id=session.id,
@@ -388,27 +402,57 @@ class DeploymentWorkflow:
         except Exception as exc:
             session.resources["agentcore_memory_error"] = str(exc)
 
+    def _add_chat_message(self, session: DeploymentSession, role: str, content: str) -> None:
+        messages = list(session.resources.get("chat_messages", []))
+        messages.append({"role": role, "content": content})
+        session.resources["chat_messages"] = messages[-30:]
+
+    def _merge_answers(self, answers: dict[str, str], updates: dict[str, str]) -> None:
+        for key, value in updates.items():
+            if not value:
+                continue
+            if key in {"region", "environment", "workload_type"} or not answers.get(key):
+                answers[key] = value
+
     def _extract_chat_answers(self, message: str) -> dict[str, str]:
         answers: dict[str, str] = {}
         lower = message.lower()
         email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", message)
         if email:
             answers["owner"] = email.group(0)
-        cost_center = re.search(r"(?:cost\s*center|cost_center|cc)[:\s-]*([A-Za-z]{0,4}-?\d{3,})", message, re.I)
+        else:
+            owner = re.search(
+                r"(?:owner|owned by|team|application owner)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9 ._-]{1,60})",
+                message,
+                re.I,
+            )
+            if owner:
+                answers["owner"] = owner.group(1).strip(" .")
+        cost_center = re.search(
+            r"(?:cost\s*cent(?:er|re)|cost_center|charge\s*code|billing\s*code|cc)\s*(?:is|:|-)?\s*([A-Za-z]{0,6}-?\s*\d{2,})",
+            message,
+            re.I,
+        )
         if cost_center:
-            answers["cost_center"] = cost_center.group(1).upper()
+            answers["cost_center"] = cost_center.group(1).replace(" ", "").upper()
+        elif re.fullmatch(r"\s*(?:cc)?\s*\d{3,}\s*", message, re.I):
+            answers["cost_center"] = message.strip().upper().replace(" ", "")
         region = re.search(r"\b[a-z]{2}-[a-z]+-\d\b", message)
         if region:
             answers["region"] = region.group(0)
         env = re.search(r"\b(dev|test|stage|prod)\b", message, re.I)
         if env:
             answers["environment"] = env.group(1).lower()
-        name = re.search(r"(?:project|application|app|bucket)\s+name\s*(?:is|:)?\s*([A-Za-z0-9-_]+)", message, re.I)
+        name = re.search(
+            r"(?:project|application|app|bucket)\s*(?:name|called|named)?\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9-_]{2,})",
+            message,
+            re.I,
+        )
         if name:
             answers["name"] = name.group(1)
         elif "s3" in lower and "bucket" in lower:
             answers["name"] = "chat-s3-bucket"
-        if message.strip():
+        if message.strip() and len(message.split()) > 3:
             answers["description"] = message.strip()[:500]
         if "ec2" in lower or "httpd" in lower:
             answers["workload_type"] = "ec2-httpd"
