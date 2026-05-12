@@ -1,4 +1,4 @@
-FROM node:20-slim AS builder
+FROM public.ecr.aws/docker/library/node:20-slim AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY apps/web /app/apps/web
 RUN npm install
 RUN npm run build --workspace apps/web
 
-FROM node:20-slim AS runner
+FROM public.ecr.aws/docker/library/node:20-slim AS runner
 
 ENV NODE_ENV=production
 WORKDIR /app
