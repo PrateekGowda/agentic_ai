@@ -3,9 +3,10 @@
 import os
 import time
 from typing import Any
+import json
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 from compliance_agent import run_compliance_checks
 from deployer_agent import run_deployment_step
@@ -28,12 +29,17 @@ def ping() -> dict[str, Any]:
 
 
 @app.post("/invocations")
-def invoke(request: dict[str, Any]) -> dict[str, Any]:
+async def invoke(request: Request) -> dict[str, Any]:
     agent_name = os.getenv("AGENT_NAME", "requirements")
     agent = AGENTS.get(agent_name)
     if not agent:
         raise HTTPException(status_code=400, detail=f"Unknown AGENT_NAME: {agent_name}")
-    payload = request.get("input", request)
+    raw_body = await request.body()
+    try:
+        body = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invocation body must be JSON.") from exc
+    payload = body.get("input", body)
     return agent(payload)
 
 
