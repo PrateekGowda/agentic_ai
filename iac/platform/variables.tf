@@ -54,3 +54,27 @@ variable "github_token_secret_arn" {
   description = "Optional Secrets Manager ARN containing a GitHub token or GitHub App installation token."
   default     = ""
 }
+
+variable "agentcore_requirement_runtime_arn" {
+  type        = string
+  description = "Optional AgentCore Runtime ARN for the requirement gathering agent."
+  default     = ""
+}
+
+variable "agentcore_provisioner_runtime_arn" {
+  type        = string
+  description = "Optional AgentCore Runtime ARN for the code provisioning agent."
+  default     = ""
+}
+
+variable "agentcore_deployer_runtime_arn" {
+  type        = string
+  description = "Optional AgentCore Runtime ARN for the deployment agent."
+  default     = ""
+}
+
+variable "agentcore_compliance_runtime_arn" {
+  type        = string
+  description = "Optional AgentCore Runtime ARN for the compliance agent."
+  default     = ""
+}

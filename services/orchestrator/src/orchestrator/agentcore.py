@@ -1,5 +1,9 @@
 from collections.abc import Callable
+import json
+from uuid import uuid4
 from typing import Any
+
+import boto3
 
 
 class AgentCoreRuntimeClient:
@@ -17,6 +21,15 @@ class AgentCoreRuntimeClient:
         if not self.runtime_arn:
             return self.fallback(payload)
 
-        # Wire this to the Bedrock AgentCore Runtime SDK once the runtime is deployed.
-        # Keeping the boundary explicit avoids leaking provider details into agents.
-        return self.fallback(payload | {"agentcore_runtime_arn": self.runtime_arn})
+        client = boto3.client("bedrock-agentcore")
+        response = client.invoke_agent_runtime(
+            agentRuntimeArn=self.runtime_arn,
+            runtimeSessionId=f"session-{uuid4()}",
+            contentType="application/json",
+            accept="application/json",
+            payload=json.dumps(payload).encode("utf-8"),
+        )
+        body = response["response"].read()
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        return json.loads(body)

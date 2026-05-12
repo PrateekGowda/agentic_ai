@@ -7,4 +7,5 @@ WORKDIR /app
 COPY agents /app/agents
 
 ENV PYTHONPATH=/app/agents
+EXPOSE 8080
 CMD ["python", "-m", "common.runtime"]

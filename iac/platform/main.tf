@@ -314,6 +314,155 @@ resource "aws_codebuild_project" "web_image" {
   }
 }
 
+resource "aws_codebuild_project" "agent_image" {
+  name         = "agentcore-deployer-${var.environment}-agent-image"
+  service_role = aws_iam_role.image_builder.arn
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_MEDIUM"
+    image                       = "aws/codebuild/amazonlinux2-aarch64-standard:3.0"
+    type                        = "ARM_CONTAINER"
+    privileged_mode             = true
+    image_pull_credentials_type = "CODEBUILD"
+
+    environment_variable {
+      name  = "AWS_ACCOUNT_ID"
+      value = data.aws_caller_identity.current.account_id
+    }
+
+    environment_variable {
+      name  = "REPO_URL"
+      value = var.github_repo_url
+    }
+
+    environment_variable {
+      name  = "IMAGE_TAG"
+      value = var.image_tag
+    }
+
+    environment_variable {
+      name  = "AGENT_RUNTIME_REPOSITORY_URI"
+      value = aws_ecr_repository.agent_runtime.repository_url
+    }
+  }
+
+  source {
+    type      = "NO_SOURCE"
+    buildspec = file("${path.module}/build-agent.yml")
+  }
+}
+
+resource "aws_iam_role" "agentcore_runtime" {
+  name = "agentcore-deployer-${var.environment}-agentcore-runtime"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AssumeRolePolicy"
+        Effect = "Allow"
+        Principal = {
+          Service = "bedrock-agentcore.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:bedrock-agentcore:${var.region}:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "agentcore_runtime" {
+  name = "agentcore-deployer-${var.environment}-agentcore-runtime"
+  role = aws_iam_role.agentcore_runtime.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ECRImageAccess"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ]
+        Resource = [
+          aws_ecr_repository.agent_runtime.arn
+        ]
+      },
+      {
+        Sid      = "ECRTokenAccess"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogStreams",
+          "logs:CreateLogGroup"
+        ]
+        Resource = "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/bedrock-agentcore/runtimes/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "logs:DescribeLogGroups"
+        Resource = "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "cloudwatch:PutMetricData"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "bedrock-agentcore"
+          }
+        }
+      },
+      {
+        Sid    = "BedrockModelInvocation"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
+        ]
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role" "apprunner_access" {
   name = "agentcore-deployer-${var.environment}-apprunner-access"
 
@@ -564,7 +713,11 @@ resource "aws_ecs_task_definition" "app" {
         { name = "GITHUB_OWNER", value = var.github_owner },
         { name = "GITHUB_TOKEN_SECRET_ARN", value = var.github_token_secret_arn },
         { name = "PROJECT_STATE_BUCKET", value = "hack-aib-tf-backend" },
-        { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" }
+        { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" },
+        { name = "AGENTCORE_REQUIREMENT_RUNTIME_ARN", value = var.agentcore_requirement_runtime_arn },
+        { name = "AGENTCORE_PROVISIONER_RUNTIME_ARN", value = var.agentcore_provisioner_runtime_arn },
+        { name = "AGENTCORE_DEPLOYER_RUNTIME_ARN", value = var.agentcore_deployer_runtime_arn },
+        { name = "AGENTCORE_COMPLIANCE_RUNTIME_ARN", value = var.agentcore_compliance_runtime_arn }
       ]
       logConfiguration = {
         logDriver = "awslogs"

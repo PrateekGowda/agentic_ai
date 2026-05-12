@@ -30,6 +30,14 @@ output "web_image_build_project_name" {
   value = aws_codebuild_project.web_image.name
 }
 
+output "agent_image_build_project_name" {
+  value = aws_codebuild_project.agent_image.name
+}
+
+output "agentcore_runtime_role_arn" {
+  value = aws_iam_role.agentcore_runtime.arn
+}
+
 output "backend_service_url" {
   value = var.deploy_services ? aws_apprunner_service.backend[0].service_url : null
 }
