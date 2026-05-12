@@ -225,6 +225,16 @@ export default function Home() {
             <p>Architecture: {session?.architecture_doc_url ? <a href={session.architecture_doc_url}>ARCHITECTURE.md</a> : <span className="muted">Pending</span>}</p>
             <p>Compliance: {session?.compliance_report_url ? <a href={session.compliance_report_url}>COMPLIANCE.md</a> : <span className="muted">Pending</span>}</p>
             <p>S3 Bucket: {session?.resources?.s3_bucket?.bucket_uri ? <code>{String(session.resources.s3_bucket.bucket_uri)}</code> : <span className="muted">Not created</span>}</p>
+            <p>EC2 URL: {session?.resources?.ec2_httpd?.url ? <a href={String(session.resources.ec2_httpd.url)}>{String(session.resources.ec2_httpd.url)}</a> : <span className="muted">Not created</span>}</p>
+            <p>
+              EC2 PEM: {session?.resources?.ec2_httpd?.ssh_private_key_attachment?.download_url ? (
+                <a href={String(session.resources.ec2_httpd.ssh_private_key_attachment.download_url)}>
+                  Download private key
+                </a>
+              ) : (
+                <span className="muted">Not requested; SSM Session Manager is preferred</span>
+              )}
+            </p>
             <p>S3 State: {session?.resources?.project_state?.state_uri ? <code>{String(session.resources.project_state.state_uri)}</code> : <span className="muted">Pending</span>}</p>
             <p>S3 Logs: {session?.resources?.project_state?.logs_uri ? <code>{String(session.resources.project_state.logs_uri)}</code> : <span className="muted">Pending</span>}</p>
             <p>AgentCore Memory: {session?.resources?.agentcore_memory_id ? <code>{String(session.resources.agentcore_memory_id)}</code> : <span className="muted">Not configured</span>}</p>

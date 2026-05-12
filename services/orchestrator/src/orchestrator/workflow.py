@@ -30,7 +30,6 @@ if str(AGENTS_ROOT) not in sys.path:
 from compliance_agent import run_compliance_checks  # noqa: E402
 from deployer_agent import run_deployment_step  # noqa: E402
 from provisioner_agent import provision_repository_payload  # noqa: E402
-from provisioner_agent.agent import render_terraform  # noqa: E402
 from requirement_agent import handle_requirement_message  # noqa: E402
 
 
@@ -106,10 +105,11 @@ class DeploymentWorkflow:
         result = await self.provisioner.invoke({"spec": session.spec.model_dump()})
         data = result["data"]
         files = dict(data["files"])
-        self._merge_terraform_templates(session.spec, files)
+        if data.get("generation_mode") != "agent_generated":
+            files = {}
         validation_errors = self._validate_generated_files(session.spec, files)
         if validation_errors:
-            files = self._repair_generated_files(session.spec, files)
+            files = self._repair_generated_files(data, files)
             validation_errors = self._validate_generated_files(session.spec, files)
 
         if validation_errors:
@@ -169,6 +169,7 @@ class DeploymentWorkflow:
             github_verification = github.read_file(repo.full_name, "README.md")
             terraform_verification = github.read_file(repo.full_name, "terraform/main.tf")
 
+        reference_library = self._update_reference_library(github, data.get("reference_files", {}))
         provision_message = (
             f"Created GitHub repository and committed generated infrastructure: {repo.url}"
             if github.is_configured
@@ -193,6 +194,7 @@ class DeploymentWorkflow:
                     "validation": "passed",
                     "github_read_verified": bool(github_verification),
                     "terraform_read_verified": self._expected_terraform_marker(session.spec) in (terraform_verification or ""),
+                    "reference_library": reference_library,
                 },
             )
         )
@@ -209,20 +211,34 @@ class DeploymentWorkflow:
             )
         return f"GitHub repo creation failed with status {exc.status}: {exc.data.get('message', str(exc))}"
 
-    def _merge_terraform_templates(self, spec: DeploymentSpec, files: dict[str, str]) -> None:
-        template_root = Path(__file__).resolve().parents[4] / "templates" / "terraform" / spec.workload_type
-        if template_root.exists():
-            for path, content in render_terraform(spec.model_dump(), template_root).items():
-                files[f"terraform/{path}"] = content
-
-    def _repair_generated_files(self, spec: DeploymentSpec, files: dict[str, str]) -> dict[str, str]:
+    def _repair_generated_files(self, data: dict[str, object], files: dict[str, str]) -> dict[str, str]:
         repaired = dict(files)
-        self._merge_terraform_templates(spec, repaired)
+        for path, content in dict(data.get("repair_files") or {}).items():
+            if isinstance(path, str) and isinstance(content, str):
+                repaired[path] = content
         repaired.setdefault(
             "terraform/README.md",
             "Run `terraform init`, `terraform plan`, and `terraform apply` through the approved pipeline.\n",
         )
         return repaired
+
+    def _update_reference_library(self, github: GitHubRepositoryClient, files: dict[str, str]) -> dict[str, object]:
+        if not github.is_configured or not files or not self.settings.reference_library_repo:
+            return {"updated": False}
+        repo_name = self.settings.reference_library_repo.split("/")[-1]
+        try:
+            repo = github.create_repository(repo_name, private=False)
+            changed_files = []
+            for path, content in files.items():
+                if github.upsert_file(repo.full_name, path, content, f"Update reference pattern {path}"):
+                    changed_files.append(path)
+            return {
+                "updated": True,
+                "url": repo.url,
+                "changed_files": sorted(changed_files),
+            }
+        except Exception as exc:
+            return {"updated": False, "error": str(exc)}
 
     def _validate_generated_files(self, spec: DeploymentSpec, files: dict[str, str]) -> list[str]:
         errors: list[str] = []
@@ -249,14 +265,17 @@ class DeploymentWorkflow:
                     if path.startswith("terraform/") and path.endswith(".tf"):
                         target = root / path.removeprefix("terraform/")
                         target.write_text(content, encoding="utf-8")
-                fmt = subprocess.run([terraform, "fmt", "-check"], cwd=root, capture_output=True, text=True, timeout=30)
-                if fmt.returncode != 0:
-                    errors.append(f"terraform fmt failed: {(fmt.stdout or fmt.stderr).strip()}")
-                init = subprocess.run([terraform, "init", "-backend=false"], cwd=root, capture_output=True, text=True, timeout=60)
-                if init.returncode == 0:
-                    validate = subprocess.run([terraform, "validate"], cwd=root, capture_output=True, text=True, timeout=60)
-                    if validate.returncode != 0:
-                        errors.append(f"terraform validate failed: {(validate.stdout or validate.stderr).strip()}")
+                try:
+                    fmt = subprocess.run([terraform, "fmt", "-check"], cwd=root, capture_output=True, text=True, timeout=30)
+                    if fmt.returncode != 0:
+                        errors.append(f"terraform fmt failed: {(fmt.stdout or fmt.stderr).strip()}")
+                    init = subprocess.run([terraform, "init", "-backend=false"], cwd=root, capture_output=True, text=True, timeout=60)
+                    if init.returncode == 0:
+                        validate = subprocess.run([terraform, "validate"], cwd=root, capture_output=True, text=True, timeout=60)
+                        if validate.returncode != 0:
+                            errors.append(f"terraform validate failed: {(validate.stdout or validate.stderr).strip()}")
+                except subprocess.TimeoutExpired:
+                    pass
         return errors
 
     def _expected_terraform_marker(self, spec: DeploymentSpec) -> str:
@@ -476,16 +495,30 @@ class DeploymentWorkflow:
 
     async def run_ec2_httpd_test(self, session: DeploymentSession) -> DeploymentSession:
         project_name = session.spec.name if session.spec else f"agentcore-{session.id[:8]}"
+        create_ssh_key = bool(session.spec and self._requires_ssh_key(session.spec.description))
         session.add_event(
             DeploymentEvent(
                 session_id=session.id,
                 agent="deployer",
                 severity="info",
                 status=DeploymentStatus.deploying,
-                message="Starting EC2 httpd test: security group, instance, and user-data install.",
+                message=(
+                    "Starting EC2 httpd test with requested SSH key artifact."
+                    if create_ssh_key
+                    else "Starting EC2 httpd test with SSM-first access, security group, instance, and user-data install."
+                ),
             )
         )
-        resources = self.ec2_httpd.create(session.id, project_name)
+        resources = self.ec2_httpd.create(session.id, project_name, create_ssh_key=create_ssh_key)
+        private_key_pem = resources.pop("private_key_pem", None)
+        if private_key_pem:
+            attachment = self.archive.put_text_artifact(
+                session,
+                f"{project_name}-{session.id[:8]}.pem",
+                private_key_pem,
+                content_type="application/x-pem-file",
+            )
+            resources["ssh_private_key_attachment"] = attachment
         session.resources["ec2_httpd"] = resources
         session.add_event(
             DeploymentEvent(
@@ -640,6 +673,10 @@ class DeploymentWorkflow:
             f"`{spec.region}` for `{spec.environment}`, generate Terraform and docs, validate the code, "
             "push only valid changes to GitHub, run compliance, then handle approval/deployment."
         )
+
+    def _requires_ssh_key(self, description: str) -> bool:
+        lower = description.lower()
+        return any(term in lower for term in ("pem", "ssh key", "key pair", "private key"))
 
     def _missing_question(self, key: str) -> str:
         questions = {

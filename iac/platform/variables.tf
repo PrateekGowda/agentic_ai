@@ -20,6 +20,12 @@ variable "github_owner" {
   description = "GitHub organization or user that receives generated repositories."
 }
 
+variable "reference_library_repo" {
+  type        = string
+  description = "GitHub repository name used as the reusable Terraform reference library."
+  default     = "iac-codebase-agentic-ai"
+}
+
 variable "agentcore_runtime_image_uri" {
   type        = string
   description = "Container image URI used by AgentCore runtimes."

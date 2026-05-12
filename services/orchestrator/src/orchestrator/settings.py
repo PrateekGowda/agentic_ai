@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     github_token: str | None = None
     github_token_secret_arn: str | None = None
     github_owner: str | None = None
+    reference_library_repo: str = "iac-codebase-agentic-ai"
     company_standards_path: str = "./samples/company-standards.md"
     project_state_bucket: str = "hack-aib-tf-backend"
     agentcore_memory_id: str | None = None

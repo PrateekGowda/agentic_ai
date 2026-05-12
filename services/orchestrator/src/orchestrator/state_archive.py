@@ -37,6 +37,35 @@ class S3ProjectStateArchive:
             "logs_uri": f"s3://{self.bucket}/{prefix}/logs/events.json",
         }
 
+    def put_text_artifact(
+        self,
+        session: DeploymentSession,
+        filename: str,
+        content: str,
+        content_type: str = "text/plain",
+    ) -> dict[str, Any]:
+        project_name = session.spec.name if session.spec else session.id
+        prefix = f"{project_name}/{session.id}/artifacts"
+        key = f"{prefix}/{filename}"
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType=content_type,
+            ServerSideEncryption="AES256",
+        )
+        download_url = self.s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=900,
+        )
+        return {
+            "filename": filename,
+            "s3_uri": f"s3://{self.bucket}/{key}",
+            "download_url": download_url,
+            "expires_in_seconds": 900,
+        }
+
     def _put_json(self, key: str, payload: Any) -> None:
         self.s3.put_object(
             Bucket=self.bucket,

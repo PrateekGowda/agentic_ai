@@ -544,6 +544,7 @@ resource "aws_apprunner_service" "backend" {
           AWS_REGION                        = var.region
           GITHUB_OWNER                      = var.github_owner
           GITHUB_TOKEN_SECRET_ARN           = var.github_token_secret_arn
+          REFERENCE_LIBRARY_REPO            = var.reference_library_repo
           COMPANY_STANDARDS_PATH            = "/app/samples/company-standards.md"
           AGENTCORE_REQUIREMENT_RUNTIME_ARN = ""
           AGENTCORE_PROVISIONER_RUNTIME_ARN = ""
@@ -712,6 +713,7 @@ resource "aws_ecs_task_definition" "app" {
         { name = "AWS_REGION", value = var.region },
         { name = "GITHUB_OWNER", value = var.github_owner },
         { name = "GITHUB_TOKEN_SECRET_ARN", value = var.github_token_secret_arn },
+        { name = "REFERENCE_LIBRARY_REPO", value = var.reference_library_repo },
         { name = "PROJECT_STATE_BUCKET", value = "hack-aib-tf-backend" },
         { name = "COMPANY_STANDARDS_PATH", value = "/app/samples/company-standards.md" },
         { name = "AGENTCORE_REQUIREMENT_RUNTIME_ARN", value = var.agentcore_requirement_runtime_arn },
