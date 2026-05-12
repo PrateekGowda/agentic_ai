@@ -69,6 +69,7 @@ export interface DeploymentSession {
   findings: ComplianceFinding[];
   events: DeploymentEvent[];
   github_token_configured?: boolean;
+  resources?: Record<string, any>;
   createdAt: string;
   updatedAt: string;
 }

@@ -19,7 +19,11 @@ const defaultAnswers = {
 
 export default function Home() {
   const [session, setSession] = useState<DeploymentSession | null>(null);
+  const [projects, setProjects] = useState<DeploymentSession[]>([]);
   const [answers, setAnswers] = useState(defaultAnswers);
+  const [chatMessage, setChatMessage] = useState(
+    "Create a basic EC2 instance in us-east-1, install httpd, owner platform@example.com, cost center CC-1001",
+  );
   const [githubToken, setGithubToken] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -40,12 +44,19 @@ export default function Home() {
   }
 
   async function startSession() {
-    setSession(await call<DeploymentSession>("/sessions", { method: "POST" }));
+    const created = await call<DeploymentSession>("/sessions", { method: "POST" });
+    setSession(created);
+    await refreshProjects();
+  }
+
+  async function refreshProjects() {
+    setProjects(await call<DeploymentSession[]>("/sessions"));
   }
 
   async function ensureSession() {
     const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
     setSession(current);
+    await refreshProjects();
     return current;
   }
 
@@ -57,6 +68,7 @@ export default function Home() {
     });
     setGithubToken("");
     setSession(updated);
+    await refreshProjects();
   }
 
   async function submitRequirements(event: FormEvent) {
@@ -67,23 +79,51 @@ export default function Home() {
       body: JSON.stringify({ message: "Create infrastructure from UI answers.", answers }),
     });
     setSession(updated);
+    await refreshProjects();
   }
 
   async function runStep(step: "provision" | "compliance" | "approve" | "deploy") {
     if (!session) return;
     setSession(await call<DeploymentSession>(`/sessions/${session.id}/${step}`, { method: "POST" }));
+    await refreshProjects();
   }
 
   async function runAutomatically() {
     const current = await ensureSession();
+    const chatAnswers = {
+      ...answers,
+      workload_type:
+        chatMessage.toLowerCase().includes("ec2") || chatMessage.toLowerCase().includes("httpd")
+          ? "ec2-httpd"
+          : answers.workload_type,
+    };
     const updated = await call<DeploymentSession>(`/sessions/${current.id}/run`, {
       method: "POST",
       body: JSON.stringify({
-        message: "Run the complete deployment workflow automatically from UI answers.",
-        answers,
+        message: chatMessage,
+        answers: chatAnswers,
       }),
     });
     setSession(updated);
+    await refreshProjects();
+  }
+
+  async function runEc2HttpdTest() {
+    const current = await ensureSession();
+    const updated = await call<DeploymentSession>(`/sessions/${current.id}/ec2-httpd-test`, {
+      method: "POST",
+    });
+    setSession(updated);
+    await refreshProjects();
+  }
+
+  async function destroyProject() {
+    if (!session || !confirm("Destroy resources tracked by this project?")) return;
+    const updated = await call<DeploymentSession>(`/sessions/${session.id}/destroy`, {
+      method: "POST",
+    });
+    setSession(updated);
+    await refreshProjects();
   }
 
   return (
@@ -106,7 +146,13 @@ export default function Home() {
               Start Session
             </button>
             <button className="button" onClick={runAutomatically} disabled={busy}>
-              Run Automatically
+              Send To Agent
+            </button>
+            <button className="button secondary" onClick={runEc2HttpdTest} disabled={!session || busy}>
+              Run EC2 httpd Test
+            </button>
+            <button className="button secondary" onClick={destroyProject} disabled={!session || busy}>
+              Destroy Project
             </button>
             <button className="button" onClick={() => runStep("provision")} disabled={!session?.spec || busy}>
               Create GitHub Repo
@@ -122,8 +168,23 @@ export default function Home() {
             </button>
           </div>
 
+          <section className="stack">
+            <h2>Chatbot</h2>
+            <label className="field">
+              Tell the agents what to build
+              <textarea
+                value={chatMessage}
+                onChange={(event) => setChatMessage(event.target.value)}
+                rows={5}
+              />
+            </label>
+            <p className="muted">
+              Example: `Create a basic EC2 instance, install httpd, show me the URL, then allow destroy`.
+            </p>
+          </section>
+
           <form className="stack" onSubmit={submitRequirements}>
-            <h2>Requirements</h2>
+            <h2>Requirement Fields</h2>
             <label className="field">
               Name
               <input value={answers.name} onChange={(event) => setAnswers({ ...answers, name: event.target.value })} />
@@ -171,7 +232,7 @@ export default function Home() {
             </button>
           </form>
           <p className="muted">
-            Use `Run Automatically` to let the agents gather requirements, generate and commit
+            Use `Send To Agent` to let the agents gather requirements, generate and commit
             Terraform, run compliance, approve a dev deployment, and publish documentation in one flow.
           </p>
           <section className="stack" style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
@@ -197,6 +258,31 @@ export default function Home() {
 
         <aside className="stack">
           <section className="panel stack">
+            <div className="row">
+              <h2 style={{ margin: 0 }}>Projects</h2>
+              <button className="button secondary" onClick={refreshProjects} disabled={busy}>
+                Refresh
+              </button>
+            </div>
+            {projects.length ? (
+              <div className="stack">
+                {projects.map((project) => (
+                  <button
+                    key={project.id}
+                    className="button secondary"
+                    style={{ textAlign: "left" }}
+                    onClick={() => setSession(project)}
+                  >
+                    {(project.spec?.name ?? project.id.slice(0, 8))} - {project.status}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No projects loaded. Start a session or refresh.</p>
+            )}
+          </section>
+
+          <section className="panel stack">
             <h2>Repository and Artifacts</h2>
             <p>
               GitHub:{" "}
@@ -216,6 +302,16 @@ export default function Home() {
               Compliance:{" "}
               {session?.complianceReportUrl ? <a href={session.complianceReportUrl}>COMPLIANCE.md</a> : <span className="muted">Pending</span>}
             </p>
+            <p>
+              EC2 httpd URL:{" "}
+              {session?.resources?.ec2_httpd?.url ? (
+                <a href={String(session.resources.ec2_httpd.url)} target="_blank">
+                  {String(session.resources.ec2_httpd.url)}
+                </a>
+              ) : (
+                <span className="muted">Not created</span>
+              )}
+            </p>
           </section>
 
           <section className="panel stack">
@@ -233,7 +329,7 @@ export default function Home() {
           </section>
 
           <section className="panel stack">
-            <h2>Deployment Timeline</h2>
+            <h2>Execution Logs</h2>
             {session?.events.length ? (
               session.events.map((event) => (
                 <div key={event.id} className={`event ${event.severity}`}>

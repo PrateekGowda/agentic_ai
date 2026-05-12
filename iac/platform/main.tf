@@ -532,6 +532,17 @@ resource "aws_iam_role_policy" "ecs_task" {
           "logs:CreateLogStream",
           "logs:PutLogEvents",
           "secretsmanager:GetSecretValue",
+          "ssm:GetParameter",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeInstances",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:CreateSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:DeleteSecurityGroup",
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:CreateTags",
           "bedrock-agentcore:*"
         ]
         Resource = "*"

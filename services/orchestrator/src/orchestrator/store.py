@@ -15,6 +15,9 @@ class InMemorySessionStore:
     def get(self, session_id: str) -> DeploymentSession:
         return self._sessions[session_id]
 
+    def list(self) -> list[DeploymentSession]:
+        return sorted(self._sessions.values(), key=lambda session: session.updated_at, reverse=True)
+
     def save(self, session: DeploymentSession) -> DeploymentSession:
         self._sessions[session.id] = session
         return session

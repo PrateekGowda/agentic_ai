@@ -17,6 +17,7 @@ class DeploymentStatus(StrEnum):
     succeeded = "succeeded"
     failed = "failed"
     blocked = "blocked"
+    destroyed = "destroyed"
 
 
 class DeploymentSpec(BaseModel):
@@ -25,7 +26,7 @@ class DeploymentSpec(BaseModel):
     cloud: Literal["aws"] = "aws"
     region: str = "us-east-1"
     environment: Literal["dev", "test", "stage", "prod"] = "dev"
-    workload_type: Literal["s3-lambda-api", "vpc-baseline"] = "s3-lambda-api"
+    workload_type: Literal["s3-lambda-api", "vpc-baseline", "ec2-httpd"] = "s3-lambda-api"
     owner: str
     cost_center: str
     compliance_profile: Literal["baseline", "regulated"] = "baseline"
@@ -65,7 +66,7 @@ class DeploymentEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     session_id: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    agent: Literal["requirements", "provisioner", "deployer", "compliance"]
+    agent: Literal["requirements", "provisioner", "deployer", "compliance", "destroyer"]
     severity: Literal["info", "warning", "error", "success"] = "info"
     status: DeploymentStatus
     message: str
@@ -85,6 +86,7 @@ class DeploymentSession(BaseModel):
     approved: bool = False
     github_token: str | None = Field(default=None, exclude=True)
     github_token_configured: bool = False
+    resources: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

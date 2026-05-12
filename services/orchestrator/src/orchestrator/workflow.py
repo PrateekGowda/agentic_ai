@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from orchestrator.agentcore import AgentCoreRuntimeClient
+from orchestrator.aws_resources import Ec2HttpdManager
 from orchestrator.github_client import GitHubRepositoryClient
 from orchestrator.models import (
     ComplianceFinding,
@@ -41,6 +42,7 @@ class DeploymentWorkflow:
             settings.agentcore_compliance_runtime_arn,
             run_compliance_checks,
         )
+        self.ec2_httpd = Ec2HttpdManager(settings.aws_region)
 
     def _github(self, session: DeploymentSession) -> GitHubRepositoryClient:
         return GitHubRepositoryClient(
@@ -200,4 +202,60 @@ class DeploymentWorkflow:
                 message="No blocking compliance findings found; automatic dev deployment approved.",
             )
         )
-        return await self.deploy(session)
+        session = await self.deploy(session)
+        if session.spec and session.spec.workload_type == "ec2-httpd":
+            session = await self.run_ec2_httpd_test(session)
+        return session
+
+    async def run_ec2_httpd_test(self, session: DeploymentSession) -> DeploymentSession:
+        project_name = session.spec.name if session.spec else f"agentcore-{session.id[:8]}"
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="deployer",
+                severity="info",
+                status=DeploymentStatus.deploying,
+                message="Starting EC2 httpd test: security group, instance, and user-data install.",
+            )
+        )
+        resources = self.ec2_httpd.create(session.id, project_name)
+        session.resources["ec2_httpd"] = resources
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="deployer",
+                severity="success",
+                status=DeploymentStatus.succeeded,
+                message=f"EC2 httpd test is running at {resources.get('url')}",
+                details=resources,
+            )
+        )
+        return session
+
+    async def destroy(self, session: DeploymentSession) -> DeploymentSession:
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="destroyer",
+                severity="warning",
+                status=DeploymentStatus.remediating,
+                message="Destroy started for resources tracked by this project.",
+            )
+        )
+        if session.resources.get("ec2_httpd"):
+            result = self.ec2_httpd.destroy(session.resources["ec2_httpd"])
+            session.resources["ec2_httpd_destroy"] = result
+        else:
+            result = {"message": "No EC2 httpd resources tracked for this project."}
+
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="destroyer",
+                severity="success",
+                status=DeploymentStatus.destroyed,
+                message="Destroy completed for tracked project resources.",
+                details=result,
+            )
+        )
+        return session

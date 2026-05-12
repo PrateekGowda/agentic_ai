@@ -34,6 +34,11 @@ def create_session() -> dict[str, object]:
     return store.create().model_dump(mode="json")
 
 
+@app.get("/sessions")
+def list_sessions() -> list[dict[str, object]]:
+    return [session.model_dump(mode="json") for session in store.list()]
+
+
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> dict[str, object]:
     try:
@@ -98,6 +103,20 @@ def approve(session_id: str) -> dict[str, object]:
 async def deploy(session_id: str) -> dict[str, object]:
     session = store.get(session_id)
     updated = await workflow().deploy(session)
+    return store.save(updated).model_dump(mode="json")
+
+
+@app.post("/sessions/{session_id}/ec2-httpd-test")
+async def ec2_httpd_test(session_id: str) -> dict[str, object]:
+    session = store.get(session_id)
+    updated = await workflow().run_ec2_httpd_test(session)
+    return store.save(updated).model_dump(mode="json")
+
+
+@app.post("/sessions/{session_id}/destroy")
+async def destroy(session_id: str) -> dict[str, object]:
+    session = store.get(session_id)
+    updated = await workflow().destroy(session)
     return store.save(updated).model_dump(mode="json")
 
 
