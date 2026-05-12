@@ -18,6 +18,7 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
     llm_answers = _extract_answers_with_llm(original_message, answers)
     answers.update({key: value for key, value in llm_answers.items() if value and not answers.get(key)})
     answers.update({key: value for key, value in _extract_answers(original_message).items() if not answers.get(key)})
+    _normalize_answers(answers)
     missing = [label for key, label in REQUIRED_FIELDS.items() if not answers.get(key)]
 
     if missing:
@@ -64,6 +65,17 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
         "message": "Requirements are complete and ready for Terraform generation.",
         "data": {"complete": True, "spec": spec},
     }
+
+
+def _normalize_answers(answers: dict[str, Any]) -> None:
+    if answers.get("environment") not in {"dev", "test", "stage", "prod"}:
+        answers["environment"] = "dev"
+    if answers.get("compliance_profile") not in {"baseline", "regulated"}:
+        answers["compliance_profile"] = "baseline"
+    if answers.get("github_visibility") not in {"private", "internal", "public"}:
+        answers["github_visibility"] = "private"
+    if answers.get("workload_type") not in {"s3-lambda-api", "vpc-baseline", "ec2-httpd", "s3-bucket"}:
+        answers["workload_type"] = _infer_workload(str(answers.get("description", "")))
 
 
 def _extract_answers_with_llm(message: str, existing: dict[str, Any]) -> dict[str, str]:
