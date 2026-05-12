@@ -60,6 +60,13 @@ async def gather_requirements(session_id: str, request: RequirementMessage) -> d
     return store.save(updated).model_dump(mode="json")
 
 
+@app.post("/sessions/{session_id}/chat")
+async def chat(session_id: str, request: RequirementMessage) -> dict[str, object]:
+    session = store.get(session_id)
+    updated = await workflow().chat(session, request)
+    return store.save(updated).model_dump(mode="json")
+
+
 @app.post("/sessions/{session_id}/github-token")
 def set_github_token(session_id: str, request: GitHubTokenRequest) -> dict[str, object]:
     session = store.get(session_id)

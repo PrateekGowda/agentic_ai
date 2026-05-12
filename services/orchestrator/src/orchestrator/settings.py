@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     github_owner: str | None = None
     company_standards_path: str = "./samples/company-standards.md"
     project_state_bucket: str = "hack-aib-tf-backend"
+    agentcore_memory_id: str | None = None
 
     agentcore_requirement_runtime_arn: str | None = None
     agentcore_provisioner_runtime_arn: str | None = None

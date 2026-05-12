@@ -717,7 +717,8 @@ resource "aws_ecs_task_definition" "app" {
         { name = "AGENTCORE_REQUIREMENT_RUNTIME_ARN", value = var.agentcore_requirement_runtime_arn },
         { name = "AGENTCORE_PROVISIONER_RUNTIME_ARN", value = var.agentcore_provisioner_runtime_arn },
         { name = "AGENTCORE_DEPLOYER_RUNTIME_ARN", value = var.agentcore_deployer_runtime_arn },
-        { name = "AGENTCORE_COMPLIANCE_RUNTIME_ARN", value = var.agentcore_compliance_runtime_arn }
+        { name = "AGENTCORE_COMPLIANCE_RUNTIME_ARN", value = var.agentcore_compliance_runtime_arn },
+        { name = "AGENTCORE_MEMORY_ID", value = var.agentcore_memory_id }
       ]
       logConfiguration = {
         logDriver = "awslogs"

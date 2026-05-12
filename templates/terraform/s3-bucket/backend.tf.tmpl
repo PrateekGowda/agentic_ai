@@ -1,0 +1,7 @@
+terraform {
+  backend "s3" {
+    bucket = "hack-aib-tf-backend"
+    key    = "${name}/${environment}/terraform.tfstate"
+    region = "${region}"
+  }
+}

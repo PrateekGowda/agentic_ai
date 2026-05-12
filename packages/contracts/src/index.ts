@@ -21,7 +21,7 @@ export interface DeploymentSpec {
   cloud: "aws";
   region: string;
   environment: Environment;
-  workload_type: "s3-lambda-api" | "vpc-baseline" | "ec2-httpd";
+  workload_type: "s3-lambda-api" | "vpc-baseline" | "ec2-httpd" | "s3-bucket";
   owner: string;
   cost_center: string;
   compliance_profile: "baseline" | "regulated";

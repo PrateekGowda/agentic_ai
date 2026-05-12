@@ -26,7 +26,7 @@ class DeploymentSpec(BaseModel):
     cloud: Literal["aws"] = "aws"
     region: str = "us-east-1"
     environment: Literal["dev", "test", "stage", "prod"] = "dev"
-    workload_type: Literal["s3-lambda-api", "vpc-baseline", "ec2-httpd"] = "s3-lambda-api"
+    workload_type: Literal["s3-lambda-api", "vpc-baseline", "ec2-httpd", "s3-bucket"] = "s3-lambda-api"
     owner: str
     cost_center: str
     compliance_profile: Literal["baseline", "regulated"] = "baseline"

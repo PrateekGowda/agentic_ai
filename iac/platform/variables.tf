@@ -78,3 +78,9 @@ variable "agentcore_compliance_runtime_arn" {
   description = "Optional AgentCore Runtime ARN for the compliance agent."
   default     = ""
 }
+
+variable "agentcore_memory_id" {
+  type        = string
+  description = "Optional AgentCore Memory ID used to persist chat context."
+  default     = ""
+}

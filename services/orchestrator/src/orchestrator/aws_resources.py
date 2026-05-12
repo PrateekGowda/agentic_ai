@@ -15,6 +15,71 @@ class Ec2HttpdManager:
         vpc_id = self.ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"][0][
             "VpcId"
         ]
+
+
+class S3BucketManager:
+    def __init__(self, region: str) -> None:
+        self.region = region
+        self.s3 = boto3.client("s3", region_name=region)
+
+    def create(self, project_id: str, project_name: str) -> dict[str, Any]:
+        bucket_name = self._bucket_name(project_id, project_name)
+        params: dict[str, Any] = {"Bucket": bucket_name}
+        if self.region != "us-east-1":
+            params["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
+        self.s3.create_bucket(**params)
+        self.s3.put_public_access_block(
+            Bucket=bucket_name,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            },
+        )
+        self.s3.put_bucket_versioning(Bucket=bucket_name, VersioningConfiguration={"Status": "Enabled"})
+        self.s3.put_bucket_encryption(
+            Bucket=bucket_name,
+            ServerSideEncryptionConfiguration={
+                "Rules": [
+                    {
+                        "ApplyServerSideEncryptionByDefault": {
+                            "SSEAlgorithm": "AES256",
+                        }
+                    }
+                ]
+            },
+        )
+        self.s3.put_bucket_tagging(
+            Bucket=bucket_name,
+            Tagging={
+                "TagSet": [
+                    {"Key": "ManagedBy", "Value": "agentcore-multi-agent-deployer"},
+                    {"Key": "ProjectId", "Value": project_id},
+                    {"Key": "Name", "Value": project_name},
+                ]
+            },
+        )
+        return {"bucket_name": bucket_name, "bucket_uri": f"s3://{bucket_name}", "region": self.region}
+
+    def destroy(self, resources: dict[str, Any]) -> dict[str, Any]:
+        bucket_name = resources.get("bucket_name")
+        if not bucket_name:
+            return {"message": "No S3 bucket tracked for this project."}
+        paginator = self.s3.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=bucket_name):
+            objects = [
+                {"Key": item["Key"], "VersionId": item["VersionId"]}
+                for item in page.get("Versions", []) + page.get("DeleteMarkers", [])
+            ]
+            if objects:
+                self.s3.delete_objects(Bucket=bucket_name, Delete={"Objects": objects})
+        self.s3.delete_bucket(Bucket=bucket_name)
+        return {"bucket_name": bucket_name, "bucket_deleted": True}
+
+    def _bucket_name(self, project_id: str, project_name: str) -> str:
+        safe_name = "".join(char.lower() if char.isalnum() else "-" for char in project_name).strip("-")
+        return f"{safe_name[:35]}-{project_id[:8]}-agentcore"
         subnet_id = self.ec2.describe_subnets(
             Filters=[
                 {"Name": "vpc-id", "Values": [vpc_id]},
