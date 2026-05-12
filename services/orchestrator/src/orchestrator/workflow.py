@@ -331,6 +331,8 @@ class DeploymentWorkflow:
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
         if status == DeploymentStatus.succeeded and session.spec and session.spec.workload_type == "s3-bucket":
             session = await self.run_s3_bucket_test(session)
+        if status == DeploymentStatus.succeeded and session.spec and session.spec.workload_type == "ec2-httpd":
+            session = await self.run_ec2_httpd_test(session)
         self.persist_state(session)
         return session
 
@@ -460,10 +462,7 @@ class DeploymentWorkflow:
                 message="No blocking compliance findings found; automatic dev deployment approved.",
             )
         )
-        session = await self.deploy(session)
-        if session.spec and session.spec.workload_type == "ec2-httpd":
-            session = await self.run_ec2_httpd_test(session)
-        return session
+        return await self.deploy(session)
 
     async def run_s3_bucket_test(self, session: DeploymentSession) -> DeploymentSession:
         project_name = session.spec.name if session.spec else f"agentcore-{session.id[:8]}"
