@@ -693,8 +693,8 @@ resource "aws_ecs_task_definition" "app" {
   family                   = "agentcore-deployer-${var.environment}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = "1024"
-  memory                   = "2048"
+  cpu                      = var.ecs_task_cpu
+  memory                   = var.ecs_task_memory
   execution_role_arn       = aws_iam_role.ecs_task_execution[0].arn
   task_role_arn            = aws_iam_role.ecs_task[0].arn
 

@@ -15,9 +15,10 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
     answers = dict(payload.get("answers", {}))
     original_message = str(payload.get("message", ""))
     message = original_message.lower()
-    llm_answers = _extract_answers_with_llm(original_message, answers)
-    answers.update({key: value for key, value in llm_answers.items() if value and not answers.get(key)})
     answers.update({key: value for key, value in _extract_answers(original_message).items() if not answers.get(key)})
+    if any(not answers.get(key) for key in REQUIRED_FIELDS):
+        llm_answers = _extract_answers_with_llm(original_message, answers)
+        answers.update({key: value for key, value in llm_answers.items() if value and not answers.get(key)})
     _normalize_answers(answers)
     missing = [label for key, label in REQUIRED_FIELDS.items() if not answers.get(key)]
 

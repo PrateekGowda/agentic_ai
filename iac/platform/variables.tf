@@ -29,7 +29,7 @@ variable "reference_library_repo" {
 variable "bedrock_model_id" {
   type        = string
   description = "Bedrock model ID used by LLM-powered agents."
-  default     = "amazon.nova-lite-v1:0"
+  default     = "amazon.nova-pro-v1:0"
 }
 
 variable "agent_llm_enabled" {
@@ -65,6 +65,18 @@ variable "deploy_ecs" {
   type        = bool
   description = "Set true to deploy the application on ECS Fargate."
   default     = false
+}
+
+variable "ecs_task_cpu" {
+  type        = string
+  description = "CPU units for the ECS Fargate task."
+  default     = "2048"
+}
+
+variable "ecs_task_memory" {
+  type        = string
+  description = "Memory in MiB for the ECS Fargate task."
+  default     = "4096"
 }
 
 variable "github_token_secret_arn" {

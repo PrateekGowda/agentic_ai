@@ -18,9 +18,7 @@ const processSteps: { label: string; statuses: DeploymentStatus[] }[] = [
 export default function Home() {
   const [session, setSession] = useState<DeploymentSession | null>(null);
   const [projects, setProjects] = useState<DeploymentSession[]>([]);
-  const [chatMessage, setChatMessage] = useState(
-    "Create an S3 bucket",
-  );
+  const [chatMessage, setChatMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const chatMessages = (session?.resources?.chat_messages as { role: string; content: string }[] | undefined) ?? [];
@@ -124,8 +122,8 @@ export default function Home() {
             <div className="chatBubble assistant">
               <strong>Agent</strong>
               <p>
-                Tell me what to build. If details are missing, I will ask here. You can answer naturally, for example:
-                `owner platform team`, `cc1001`, or `project demo-s3`.
+                Hello, I am AI Agent for IaC orchestration. What can I do for you? Ask naturally, and I will collect
+                missing details, generate Terraform, validate it, update GitHub, and deploy after approval.
               </p>
             </div>
           )}

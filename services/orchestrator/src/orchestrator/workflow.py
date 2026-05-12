@@ -345,6 +345,25 @@ class DeploymentWorkflow:
     async def chat(self, session: DeploymentSession, request: RequirementMessage) -> DeploymentSession:
         self._add_chat_message(session, "user", request.message)
         self._remember(session, "USER", request.message, {"stage": "chat"})
+        if self._is_greeting(request.message):
+            message = (
+                "Hello, I am AI Agent for IaC orchestration. What can I do for you? "
+                "You can ask me to create or update AWS infrastructure, for example: "
+                "`create an EC2 web server in dev owner platform team cc1001`, "
+                "`create an encrypted S3 bucket`, or `update instance type to t3.small`."
+            )
+            self._add_chat_message(session, "assistant", message)
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="requirements",
+                    severity="info",
+                    status=DeploymentStatus.requirements,
+                    message=message,
+                )
+            )
+            self.persist_state(session)
+            return session
         approval_mode = self._extract_approval_mode(request.message)
         if approval_mode:
             session.resources["approval_mode"] = approval_mode
@@ -735,6 +754,10 @@ class DeploymentWorkflow:
 
     def _is_approval(self, message: str) -> bool:
         return message.strip().lower() in {"approve", "approved", "yes", "go", "deploy", "proceed"}
+
+    def _is_greeting(self, message: str) -> bool:
+        normalized = re.sub(r"[^a-z ]", "", message.lower()).strip()
+        return normalized in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}
 
     def _extract_approval_mode(self, message: str) -> str | None:
         lower = message.lower()

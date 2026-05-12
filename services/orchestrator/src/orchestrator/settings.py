@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     github_token_secret_arn: str | None = None
     github_owner: str | None = None
     reference_library_repo: str = "iac-codebase-agentic-ai"
-    bedrock_model_id: str = "amazon.nova-lite-v1:0"
+    bedrock_model_id: str = "amazon.nova-pro-v1:0"
     agent_llm_enabled: bool = True
     company_standards_path: str = "./samples/company-standards.md"
     project_state_bucket: str = "hack-aib-tf-backend"
