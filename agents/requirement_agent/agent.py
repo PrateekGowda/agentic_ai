@@ -112,7 +112,7 @@ def _extract_answers(message: str) -> dict[str, str]:
         answers["owner"] = email.group(0)
     else:
         owner = re.search(
-            r"(?:owner|owned by|team|application owner)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9 ._-]{1,60})",
+            r"(?:owner|owned by|team|application owner)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z0-9 ._-]{1,60}?)(?=\s+(?:cost\s*cent(?:er|re)|cost_center|charge\s*code|billing\s*code|cc\s*\d|cc\d|in\s+[a-z]{2}-[a-z]+-\d\b|dev\b|test\b|stage\b|prod\b|wait\b|manual\b|skip\b|direct\b)|[,.]|$)",
             message,
             re.I,
         )
@@ -124,7 +124,8 @@ def _extract_answers(message: str) -> dict[str, str]:
         re.I,
     )
     if cost_center:
-        answers["cost_center"] = cost_center.group(1).replace(" ", "").upper()
+        value = cost_center.group(1).replace(" ", "").upper()
+        answers["cost_center"] = f"CC{value}" if value.isdigit() and re.search(r"\bcc\s*\d", message, re.I) else value
     elif re.fullmatch(r"\s*(?:cc)?\s*\d{3,}\s*", message, re.I):
         answers["cost_center"] = message.strip().upper().replace(" ", "")
     region = re.search(r"\b[a-z]{2}-[a-z]+-\d\b", message)
