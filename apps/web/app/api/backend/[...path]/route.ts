@@ -1,8 +1,7 @@
 import { NextRequest } from "next/server";
 
-const backendUrl = process.env.ORCHESTRATOR_BASE_URL ?? "http://localhost:8000";
-
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  const backendUrl = process.env.ORCHESTRATOR_BASE_URL || "http://127.0.0.1:8000";
   const { path } = await context.params;
   const target = new URL(path.join("/"), `${backendUrl.replace(/\/$/, "")}/`);
   target.search = request.nextUrl.search;
