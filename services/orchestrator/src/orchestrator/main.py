@@ -175,6 +175,18 @@ def clear_session(session_id: str) -> dict[str, object]:
 @app.post("/sessions/{session_id}/approve")
 def approve(session_id: str) -> dict[str, object]:
     session = store.get(session_id)
+    if session.status != DeploymentStatus.awaiting_approval:
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="deployer",
+                severity="warning",
+                status=session.status,
+                message="Approval ignored because deployment is not in awaiting_approval state.",
+                details={"current_status": session.status},
+            )
+        )
+        return store.save(session).model_dump(mode="json")
     session.approved = True
     return store.save(session).model_dump(mode="json")
 

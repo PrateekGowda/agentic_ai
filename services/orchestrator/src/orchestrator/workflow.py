@@ -318,6 +318,59 @@ class DeploymentWorkflow:
         return session
 
     async def deploy(self, session: DeploymentSession) -> DeploymentSession:
+        if not session.spec or not session.repository_url:
+            guidance = (
+                "Deployment cannot start yet. I still need completed requirements and a generated "
+                "GitHub repository. Please continue the chat flow so I can gather details and prepare the project."
+            )
+            self._add_chat_message(session, "assistant", guidance)
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="warning",
+                    status=session.status,
+                    message="Deployment requested before requirements/provisioning completed.",
+                    details={"has_spec": bool(session.spec), "has_repository_url": bool(session.repository_url)},
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        if not session.approved:
+            self._add_chat_message(session, "assistant", "I am waiting for approval before deployment. Please approve when ready.")
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="info",
+                    status=DeploymentStatus.awaiting_approval,
+                    message="Deployment requested without approval.",
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        if session.status not in {DeploymentStatus.awaiting_approval, DeploymentStatus.deploying, DeploymentStatus.repo_created}:
+            self._add_chat_message(
+                session,
+                "assistant",
+                f"Deployment is not allowed from the current state `{session.status}`. "
+                "Complete requirements, provisioning, and compliance first.",
+            )
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="warning",
+                    status=session.status,
+                    message="Deployment requested from invalid workflow state.",
+                    details={"current_status": session.status},
+                )
+            )
+            self.persist_state(session)
+            return session
+
         if session.resources.get("halt_requested"):
             session.add_event(
                 DeploymentEvent(
@@ -383,9 +436,11 @@ class DeploymentWorkflow:
                 )
             )
             session.resources["last_apply_error"] = apply_result
-            remediated = await self._auto_remediate_and_retry(session, apply_result)
-            if remediated:
-                return session
+            precondition_error = str(apply_result.get("error", "")).lower()
+            if "missing completed spec or repository url" not in precondition_error:
+                remediated = await self._auto_remediate_and_retry(session, apply_result)
+                if remediated:
+                    return session
             self.persist_state(session)
             return session
 
@@ -453,15 +508,34 @@ class DeploymentWorkflow:
             self.persist_state(session)
 
             # Regenerate Terraform and re-run compliance before trying deploy again.
-            session = await self.provision(session)
-            if session.status == DeploymentStatus.failed:
-                continue
-            session = await self.run_compliance(session)
-            if session.status == DeploymentStatus.blocked:
+            try:
+                session = await self.provision(session)
+                if session.status == DeploymentStatus.failed:
+                    continue
+                session = await self.run_compliance(session)
+                if session.status == DeploymentStatus.blocked:
+                    self._add_chat_message(
+                        session,
+                        "assistant",
+                        "Auto-remediation produced compliance blocking findings. Please review and update the request.",
+                    )
+                    self.persist_state(session)
+                    return False
+            except Exception as exc:
+                session.add_event(
+                    DeploymentEvent(
+                        session_id=session.id,
+                        agent="deployer",
+                        severity="error",
+                        status=DeploymentStatus.failed,
+                        message=f"Auto-remediation internal error on attempt {attempt}.",
+                        details={"error": str(exc)},
+                    )
+                )
                 self._add_chat_message(
                     session,
                     "assistant",
-                    "Auto-remediation produced compliance blocking findings. Please review and update the request.",
+                    f"Auto-remediation stopped due to internal error: {exc}",
                 )
                 self.persist_state(session)
                 return False
