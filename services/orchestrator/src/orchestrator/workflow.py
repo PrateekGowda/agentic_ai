@@ -750,110 +750,110 @@ phases:
         APPLY_EXIT=${PIPESTATUS[0]}
         if [ "$APPLY_EXIT" -ne 0 ]; then
           python3 - <<'PY'
-import json
-from pathlib import Path
-lines = Path("/tmp/terraform-apply.log").read_text(encoding="utf-8", errors="ignore").splitlines()
-tail = "\n".join(lines[-40:]) if lines else "No terraform apply logs available."
-payload = {"verified": False, "stage": "terraform_apply", "error": "terraform apply failed", "error_tail": tail}
-open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
-PY
+        import json
+        from pathlib import Path
+        lines = Path("/tmp/terraform-apply.log").read_text(encoding="utf-8", errors="ignore").splitlines()
+        tail = "\n".join(lines[-40:]) if lines else "No terraform apply logs available."
+        payload = {"verified": False, "stage": "terraform_apply", "error": "terraform apply failed", "error_tail": tail}
+        open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+        PY
           exit "$APPLY_EXIT"
         fi
         python3 - <<'PY'
-import json
-import os
-import subprocess
-import sys
-import time
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
 
-import boto3
+        import boto3
 
-region = os.environ["AWS_REGION"]
-workload = os.environ["WORKLOAD_TYPE"]
-state = json.loads(subprocess.check_output(["terraform", "state", "pull"], text=True))
-resources = state.get("resources", [])
-verified = []
+        region = os.environ["AWS_REGION"]
+        workload = os.environ["WORKLOAD_TYPE"]
+        state = json.loads(subprocess.check_output(["terraform", "state", "pull"], text=True))
+        resources = state.get("resources", [])
+        verified = []
 
-def attrs(resource_type):
-    for resource in resources:
-        if resource.get("type") == resource_type:
-            for instance in resource.get("instances", []):
-                yield instance.get("attributes", {})
+        def attrs(resource_type):
+            for resource in resources:
+                if resource.get("type") == resource_type:
+                    for instance in resource.get("instances", []):
+                        yield instance.get("attributes", {})
 
-try:
-    if workload == "s3-lambda-api":
-        functions = list(attrs("aws_lambda_function"))
-        if not functions:
-            raise RuntimeError("Terraform state has no aws_lambda_function resource")
-        client = boto3.client("lambda", region_name=region)
-        for item in functions:
-            name = item.get("function_name") or item.get("id")
-            if not name:
-                raise RuntimeError("Lambda function resource is missing function_name/id")
-            state_name = "Unknown"
-            for _ in range(24):
-                config = client.get_function_configuration(FunctionName=name)
-                state_name = config.get("State", "Unknown")
-                if state_name == "Active":
-                    break
-                time.sleep(5)
-            if state_name != "Active":
-                raise RuntimeError(f"Lambda function {name} is {state_name}, not Active")
-            verified.append({"type": "lambda", "name": name, "state": state_name})
-    elif workload == "s3-bucket":
-        buckets = list(attrs("aws_s3_bucket"))
-        if not buckets:
-            raise RuntimeError("Terraform state has no aws_s3_bucket resource")
-        client = boto3.client("s3", region_name=region)
-        for item in buckets:
-            name = item.get("bucket") or item.get("id")
-            if not name:
-                raise RuntimeError("S3 bucket resource is missing bucket/id")
-            client.head_bucket(Bucket=name)
-            verified.append({"type": "s3_bucket", "name": name, "state": "available"})
-    elif workload == "ec2-httpd":
-        instances = list(attrs("aws_instance"))
-        if not instances:
-            raise RuntimeError("Terraform state has no aws_instance resource")
-        client = boto3.client("ec2", region_name=region)
-        for item in instances:
-            instance_id = item.get("id")
-            if not instance_id:
-                raise RuntimeError("EC2 instance resource is missing id")
-            state_name = "unknown"
-            for _ in range(36):
-                response = client.describe_instances(InstanceIds=[instance_id])
-                state_name = response["Reservations"][0]["Instances"][0]["State"]["Name"]
-                if state_name == "running":
-                    break
-                time.sleep(5)
-            if state_name != "running":
-                raise RuntimeError(f"EC2 instance {instance_id} is {state_name}, not running")
-            verified.append({"type": "ec2_instance", "id": instance_id, "state": state_name})
-    elif workload == "vpc-baseline":
-        vpcs = list(attrs("aws_vpc"))
-        if not vpcs:
-            raise RuntimeError("Terraform state has no aws_vpc resource")
-        client = boto3.client("ec2", region_name=region)
-        for item in vpcs:
-            vpc_id = item.get("id")
-            if not vpc_id:
-                raise RuntimeError("VPC resource is missing id")
-            client.describe_vpcs(VpcIds=[vpc_id])
-            verified.append({"type": "vpc", "id": vpc_id, "state": "available"})
-    else:
-        if not resources:
-            raise RuntimeError("Terraform apply completed but state is empty")
-        verified.append({"type": "terraform_state", "count": len(resources), "state": "present"})
+        try:
+            if workload == "s3-lambda-api":
+                functions = list(attrs("aws_lambda_function"))
+                if not functions:
+                    raise RuntimeError("Terraform state has no aws_lambda_function resource")
+                client = boto3.client("lambda", region_name=region)
+                for item in functions:
+                    name = item.get("function_name") or item.get("id")
+                    if not name:
+                        raise RuntimeError("Lambda function resource is missing function_name/id")
+                    state_name = "Unknown"
+                    for _ in range(24):
+                        config = client.get_function_configuration(FunctionName=name)
+                        state_name = config.get("State", "Unknown")
+                        if state_name == "Active":
+                            break
+                        time.sleep(5)
+                    if state_name != "Active":
+                        raise RuntimeError(f"Lambda function {name} is {state_name}, not Active")
+                    verified.append({"type": "lambda", "name": name, "state": state_name})
+            elif workload == "s3-bucket":
+                buckets = list(attrs("aws_s3_bucket"))
+                if not buckets:
+                    raise RuntimeError("Terraform state has no aws_s3_bucket resource")
+                client = boto3.client("s3", region_name=region)
+                for item in buckets:
+                    name = item.get("bucket") or item.get("id")
+                    if not name:
+                        raise RuntimeError("S3 bucket resource is missing bucket/id")
+                    client.head_bucket(Bucket=name)
+                    verified.append({"type": "s3_bucket", "name": name, "state": "available"})
+            elif workload == "ec2-httpd":
+                instances = list(attrs("aws_instance"))
+                if not instances:
+                    raise RuntimeError("Terraform state has no aws_instance resource")
+                client = boto3.client("ec2", region_name=region)
+                for item in instances:
+                    instance_id = item.get("id")
+                    if not instance_id:
+                        raise RuntimeError("EC2 instance resource is missing id")
+                    state_name = "unknown"
+                    for _ in range(36):
+                        response = client.describe_instances(InstanceIds=[instance_id])
+                        state_name = response["Reservations"][0]["Instances"][0]["State"]["Name"]
+                        if state_name == "running":
+                            break
+                        time.sleep(5)
+                    if state_name != "running":
+                        raise RuntimeError(f"EC2 instance {instance_id} is {state_name}, not running")
+                    verified.append({"type": "ec2_instance", "id": instance_id, "state": state_name})
+            elif workload == "vpc-baseline":
+                vpcs = list(attrs("aws_vpc"))
+                if not vpcs:
+                    raise RuntimeError("Terraform state has no aws_vpc resource")
+                client = boto3.client("ec2", region_name=region)
+                for item in vpcs:
+                    vpc_id = item.get("id")
+                    if not vpc_id:
+                        raise RuntimeError("VPC resource is missing id")
+                    client.describe_vpcs(VpcIds=[vpc_id])
+                    verified.append({"type": "vpc", "id": vpc_id, "state": "available"})
+            else:
+                if not resources:
+                    raise RuntimeError("Terraform apply completed but state is empty")
+                verified.append({"type": "terraform_state", "count": len(resources), "state": "present"})
 
-    payload = {"verified": True, "stage": "resource_verification", "resources": verified}
-except Exception as exc:
-    payload = {"verified": False, "stage": "resource_verification", "error": str(exc)}
-    open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
-    sys.exit(1)
+            payload = {"verified": True, "stage": "resource_verification", "resources": verified}
+        except Exception as exc:
+            payload = {"verified": False, "stage": "resource_verification", "error": str(exc)}
+            open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+            sys.exit(1)
 
-open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
-PY
+        open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+        PY
   post_build:
     commands:
       - |
@@ -887,23 +887,23 @@ phases:
         DESTROY_EXIT=${PIPESTATUS[0]}
         if [ "$DESTROY_EXIT" -ne 0 ]; then
           python3 - <<'PY'
-import json
-from pathlib import Path
-lines = Path("/tmp/terraform-destroy.log").read_text(encoding="utf-8", errors="ignore").splitlines()
-tail = "\n".join(lines[-40:]) if lines else "No terraform destroy logs available."
-payload = {"destroyed": False, "stage": "terraform_destroy", "error": "terraform destroy failed", "error_tail": tail}
-open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
-PY
+        import json
+        from pathlib import Path
+        lines = Path("/tmp/terraform-destroy.log").read_text(encoding="utf-8", errors="ignore").splitlines()
+        tail = "\n".join(lines[-40:]) if lines else "No terraform destroy logs available."
+        payload = {"destroyed": False, "stage": "terraform_destroy", "error": "terraform destroy failed", "error_tail": tail}
+        open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+        PY
           exit "$DESTROY_EXIT"
         fi
         python3 - <<'PY'
-import json
-import subprocess
-state_list = subprocess.run(["terraform", "state", "list"], capture_output=True, text=True)
-remaining = [line for line in state_list.stdout.splitlines() if line.strip()]
-payload = {"destroyed": len(remaining) == 0, "remaining_resources": remaining}
-open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
-PY
+        import json
+        import subprocess
+        state_list = subprocess.run(["terraform", "state", "list"], capture_output=True, text=True)
+        remaining = [line for line in state_list.stdout.splitlines() if line.strip()]
+        payload = {"destroyed": len(remaining) == 0, "remaining_resources": remaining}
+        open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+        PY
   post_build:
     commands:
       - |
