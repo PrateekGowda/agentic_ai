@@ -268,6 +268,8 @@ class DeploymentWorkflow:
             errors.append("terraform/backend.tf uses variables in backend block, which Terraform does not allow")
         if backend_tf and "hack-aib-tf-backend" not in backend_tf:
             errors.append("terraform/backend.tf must use the hack-aib-tf-backend state bucket")
+        if backend_tf and "dynamodb_table" in backend_tf:
+            errors.append("terraform/backend.tf must not configure dynamodb_table because lock table provisioning is not managed")
         unresolved = [placeholder for placeholder in ("${name}", "${region}", "${environment}", "${owner}", "${cost_center}") if placeholder in main_tf]
         if unresolved:
             errors.append(f"terraform/main.tf contains unresolved template variables: {', '.join(unresolved)}")
