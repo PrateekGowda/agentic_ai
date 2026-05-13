@@ -76,7 +76,11 @@ export default function Home() {
 
   const syncMessages = useCallback((data: DeploymentSession) => {
     const raw: ChatMessage[] = (data.resources?.chat_messages ?? []) as ChatMessage[];
-    setMessages(raw);
+    const terminalStatuses = new Set(["succeeded", "failed", "destroyed", "awaiting_approval", "requirements", "customizing", "repo_created", "blocked"]);
+    const sanitized = terminalStatuses.has(data.status)
+      ? raw.filter((msg) => msg.role !== "thinking")
+      : raw;
+    setMessages(sanitized);
     scrollToBottom();
   }, [scrollToBottom]);
 
@@ -126,6 +130,14 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!session) return;
+    const finishedStatuses = new Set(["succeeded", "failed", "destroyed", "awaiting_approval", "requirements", "customizing", "repo_created", "blocked"]);
+    if (busy && finishedStatuses.has(session.status)) {
+      setBusy(false);
+    }
+  }, [busy, session]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 

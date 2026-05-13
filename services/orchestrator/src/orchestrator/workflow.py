@@ -268,8 +268,6 @@ class DeploymentWorkflow:
             errors.append("terraform/backend.tf uses variables in backend block, which Terraform does not allow")
         if backend_tf and "hack-aib-tf-backend" not in backend_tf:
             errors.append("terraform/backend.tf must use the hack-aib-tf-backend state bucket")
-        if backend_tf and "dynamodb_table" in backend_tf:
-            errors.append("terraform/backend.tf must not configure dynamodb_table because lock table provisioning is not managed")
         unresolved = [placeholder for placeholder in ("${name}", "${region}", "${environment}", "${owner}", "${cost_center}") if placeholder in main_tf]
         if unresolved:
             errors.append(f"terraform/main.tf contains unresolved template variables: {', '.join(unresolved)}")
@@ -469,6 +467,7 @@ class DeploymentWorkflow:
         if session.repository_url:
             session.architecture_doc_url = f"{session.repository_url}/blob/main/ARCHITECTURE.md"
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
+        self._add_chat_message(session, "assistant", self._deployment_summary_message(apply_result))
         self.persist_state(session)
         return session
 
@@ -484,6 +483,51 @@ class DeploymentWorkflow:
         if logs_url:
             return f"Deployment failed. Review CodeBuild logs for root cause: {logs_url}"
         return f"Deployment failed with error: {error}"
+
+    def _resource_detail_lines(self, resources: object) -> list[str]:
+        lines: list[str] = []
+        if not isinstance(resources, list):
+            return lines
+        for item in resources[:8]:
+            if not isinstance(item, dict):
+                continue
+            resource_type = str(item.get("type", "resource"))
+            identifier = str(item.get("name") or item.get("id") or item.get("arn") or "")
+            state = str(item.get("state", "verified"))
+            if identifier:
+                lines.append(f"- {resource_type}: {identifier} ({state})")
+            else:
+                lines.append(f"- {resource_type}: {state}")
+        return lines
+
+    def _deployment_summary_message(self, apply_result: dict[str, object]) -> str:
+        details = self._resource_detail_lines(apply_result.get("resources"))
+        if not details:
+            details = ["- Infrastructure state verified in AWS."]
+        return (
+            "Deployment completed successfully.\n\n"
+            "What I completed:\n"
+            "- Applied Terraform from the generated GitHub repository.\n"
+            "- Verified the provisioned AWS resources are running/available.\n"
+            "Infrastructure details:\n"
+            + "\n".join(details)
+        )
+
+    def _destroy_summary_message(self, result: dict[str, object]) -> str:
+        remaining = result.get("remaining_resources")
+        if isinstance(remaining, list) and remaining:
+            remaining_lines = "\n".join(f"- {item}" for item in remaining[:10])
+            return (
+                "Destroy finished, but some tracked resources still exist.\n\n"
+                "Remaining tracked resources:\n"
+                f"{remaining_lines}"
+            )
+        return (
+            "Destroy completed for tracked project resources.\n\n"
+            "What I completed:\n"
+            "- Ran Terraform destroy for tracked resources.\n"
+            "- Confirmed no tracked resources remain in Terraform state."
+        )
 
     async def _auto_remediate_and_retry(self, session: DeploymentSession, apply_result: dict[str, object]) -> bool:
         if session.resources.get("halt_requested"):
@@ -568,7 +612,8 @@ class DeploymentWorkflow:
                 self._add_chat_message(
                     session,
                     "assistant",
-                    f"I fixed and redeployed the infrastructure successfully on attempt {attempt}.",
+                    f"I fixed and redeployed the infrastructure successfully on attempt {attempt}.\n\n"
+                    f"{self._deployment_summary_message(retry_result)}",
                 )
                 self.persist_state(session)
                 return True
@@ -755,6 +800,39 @@ phases:
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
+        python3 - <<'PY'
+        import os
+        import re
+        from pathlib import Path
+
+        import boto3
+
+        backend_file = Path("backend.tf")
+        if not backend_file.exists():
+            raise SystemExit(0)
+        backend_text = backend_file.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r'dynamodb_table\s*=\s*"([^"]+)"', backend_text)
+        if not match:
+            raise SystemExit(0)
+        table_name = match.group(1).strip()
+        if not table_name:
+            raise SystemExit(0)
+
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        dynamodb = boto3.client("dynamodb", region_name=region)
+        try:
+            dynamodb.describe_table(TableName=table_name)
+        except dynamodb.exceptions.ResourceNotFoundException:
+            dynamodb.create_table(
+                TableName=table_name,
+                AttributeDefinitions=[{"AttributeName": "LockID", "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": "LockID", "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+                SSESpecification={"Enabled": True},
+                Tags=[{"Key": "ManagedBy", "Value": "agentcore-multi-agent-deployer"}],
+            )
+            dynamodb.get_waiter("table_exists").wait(TableName=table_name)
+        PY
         terraform init -input=false -reconfigure
         terraform validate
   build:
@@ -898,6 +976,39 @@ phases:
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
+        python3 - <<'PY'
+        import os
+        import re
+        from pathlib import Path
+
+        import boto3
+
+        backend_file = Path("backend.tf")
+        if not backend_file.exists():
+            raise SystemExit(0)
+        backend_text = backend_file.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r'dynamodb_table\s*=\s*"([^"]+)"', backend_text)
+        if not match:
+            raise SystemExit(0)
+        table_name = match.group(1).strip()
+        if not table_name:
+            raise SystemExit(0)
+
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        dynamodb = boto3.client("dynamodb", region_name=region)
+        try:
+            dynamodb.describe_table(TableName=table_name)
+        except dynamodb.exceptions.ResourceNotFoundException:
+            dynamodb.create_table(
+                TableName=table_name,
+                AttributeDefinitions=[{"AttributeName": "LockID", "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": "LockID", "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+                SSESpecification={"Enabled": True},
+                Tags=[{"Key": "ManagedBy", "Value": "agentcore-multi-agent-deployer"}],
+            )
+            dynamodb.get_waiter("table_exists").wait(TableName=table_name)
+        PY
         terraform init -input=false -reconfigure
   build:
     commands:
@@ -1082,13 +1193,7 @@ phases:
                 )
             )
             session = await self.deploy(session)
-            if session.status == DeploymentStatus.succeeded:
-                self._add_chat_message(
-                    session, "assistant",
-                    "Deployment is complete and AWS resources were verified. "
-                    "You can view the GitHub repository and artifacts in the sidebar."
-                )
-            else:
+            if session.status != DeploymentStatus.succeeded:
                 self._add_chat_message(
                     session, "assistant",
                     "Deployment did not verify successfully. Check the execution logs for the CodeBuild details."
@@ -1103,7 +1208,6 @@ phases:
                 "Resources not tracked by this project state file will not be touched."
             )
             session = await self.destroy(session)
-            self._add_chat_message(session, "assistant", "Destroy completed for all tracked project resources.")
             return session
 
         # ---- AWS READ-ONLY QUERY ----
@@ -1533,6 +1637,7 @@ phases:
                 details=result,
             )
         )
+        self._add_chat_message(session, "assistant", self._destroy_summary_message(result))
         self.persist_state(session)
         return session
 
@@ -1553,6 +1658,7 @@ phases:
 
     def _add_chat_message(self, session: DeploymentSession, role: str, content: str) -> None:
         messages = list(session.resources.get("chat_messages", []))
+        messages = [msg for msg in messages if msg.get("role") != "thinking"]
         messages.append({"role": role, "content": content})
         session.resources["chat_messages"] = messages[-30:]
 

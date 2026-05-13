@@ -117,8 +117,6 @@ def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
         return None
     if "var." in backend_tf:
         return None
-    if "dynamodb_table" in backend_tf:
-        return None
     if main_tf.count("{") != main_tf.count("}"):
         return None
     if "public_access_block_configuration" in main_tf:
