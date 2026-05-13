@@ -734,7 +734,7 @@ phases:
   pre_build:
     commands:
       - |
-        set -euo pipefail
+        set -eu
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
@@ -745,9 +745,8 @@ phases:
       - |
         set +e
         cd repo/terraform
-        set -o pipefail
-        terraform apply -auto-approve -input=false 2>&1 | tee /tmp/terraform-apply.log
-        APPLY_EXIT=${PIPESTATUS[0]}
+        terraform apply -auto-approve -input=false > /tmp/terraform-apply.log 2>&1
+        APPLY_EXIT=$?
         if [ "$APPLY_EXIT" -ne 0 ]; then
           python3 - <<'PY'
         import json
@@ -872,7 +871,7 @@ phases:
   pre_build:
     commands:
       - |
-        set -euo pipefail
+        set -eu
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
@@ -882,9 +881,8 @@ phases:
       - |
         set +e
         cd repo/terraform
-        set -o pipefail
-        terraform destroy -auto-approve -input=false 2>&1 | tee /tmp/terraform-destroy.log
-        DESTROY_EXIT=${PIPESTATUS[0]}
+        terraform destroy -auto-approve -input=false > /tmp/terraform-destroy.log 2>&1
+        DESTROY_EXIT=$?
         if [ "$DESTROY_EXIT" -ne 0 ]; then
           python3 - <<'PY'
         import json
