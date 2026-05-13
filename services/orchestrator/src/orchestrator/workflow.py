@@ -11,6 +11,7 @@ import boto3
 from github import GithubException
 
 from orchestrator.agentcore import AgentCoreRuntimeClient
+from orchestrator.aws_readonly import query_aws_account
 from orchestrator.aws_resources import Ec2HttpdManager, S3BucketManager
 from orchestrator.github_client import GitHubRepositoryClient
 from orchestrator.memory import AgentCoreMemory
@@ -317,6 +318,18 @@ class DeploymentWorkflow:
         return session
 
     async def deploy(self, session: DeploymentSession) -> DeploymentSession:
+        if session.resources.get("halt_requested"):
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="warning",
+                    status=session.status,
+                    message="Deployment is halted by user request. Send `resume deployment` to continue.",
+                )
+            )
+            self.persist_state(session)
+            return session
         self._feedback(session, "deployer", "Applying the approved deployment plan and tracking created resources.")
         result = await self.deployer.invoke(
             {
@@ -353,7 +366,12 @@ class DeploymentWorkflow:
         apply_result = self._run_terraform_apply(session)
         if not apply_result.get("verified"):
             message = "Terraform apply did not complete with verified running resources."
-            self._add_chat_message(session, "assistant", f"{message} Check deployment logs for the CodeBuild failure details.")
+            error_summary = self._describe_deploy_issue(apply_result)
+            self._add_chat_message(
+                session,
+                "assistant",
+                f"{message}\n\n{error_summary}\n\nI will try auto-remediation and redeploy unless you type `stop`.",
+            )
             session.add_event(
                 DeploymentEvent(
                     session_id=session.id,
@@ -364,6 +382,10 @@ class DeploymentWorkflow:
                     details=apply_result,
                 )
             )
+            session.resources["last_apply_error"] = apply_result
+            remediated = await self._auto_remediate_and_retry(session, apply_result)
+            if remediated:
+                return session
             self.persist_state(session)
             return session
 
@@ -383,6 +405,114 @@ class DeploymentWorkflow:
             session.compliance_report_url = f"{session.repository_url}/blob/main/COMPLIANCE.md"
         self.persist_state(session)
         return session
+
+    def _describe_deploy_issue(self, apply_result: dict[str, object]) -> str:
+        error = str(apply_result.get("error", "")).strip() or "Unknown deployment error."
+        if "AccessDenied" in error:
+            return "AWS denied access while applying infrastructure. Check IAM permissions for the runner role."
+        if "NoCredentialProviders" in error or "security token" in error.lower():
+            return "The deploy runner does not have valid AWS credentials configured."
+        if "already exists" in error.lower():
+            return "A resource with the same name already exists. Consider changing project/resource naming."
+        logs_url = apply_result.get("logs_url")
+        if logs_url:
+            return f"Deployment failed. Review CodeBuild logs for root cause: {logs_url}"
+        return f"Deployment failed with error: {error}"
+
+    async def _auto_remediate_and_retry(self, session: DeploymentSession, apply_result: dict[str, object]) -> bool:
+        if session.resources.get("halt_requested"):
+            return False
+        max_retries = max(0, int(self.settings.max_auto_remediation_retries))
+        start_attempt = int(session.resources.get("remediation_attempt", 0))
+        if start_attempt >= max_retries:
+            self._add_chat_message(
+                session,
+                "assistant",
+                "Auto-remediation retry limit reached. Please update inputs or tell me what to change, then retry.",
+            )
+            return False
+
+        for attempt in range(start_attempt + 1, max_retries + 1):
+            if session.resources.get("halt_requested"):
+                self._add_chat_message(session, "assistant", "Auto-remediation stopped by user request.")
+                self.persist_state(session)
+                return False
+
+            session.resources["remediation_attempt"] = attempt
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="warning",
+                    status=DeploymentStatus.remediating,
+                    message=f"Auto-remediation attempt {attempt}/{max_retries} started.",
+                    details={"last_error": apply_result},
+                )
+            )
+            self._add_thinking(session, f"Remediating deployment error (attempt {attempt}/{max_retries})...")
+            self.persist_state(session)
+
+            # Regenerate Terraform and re-run compliance before trying deploy again.
+            session = await self.provision(session)
+            if session.status == DeploymentStatus.failed:
+                continue
+            session = await self.run_compliance(session)
+            if session.status == DeploymentStatus.blocked:
+                self._add_chat_message(
+                    session,
+                    "assistant",
+                    "Auto-remediation produced compliance blocking findings. Please review and update the request.",
+                )
+                self.persist_state(session)
+                return False
+
+            session.approved = True
+            retry_result = self._run_terraform_apply(session)
+            if retry_result.get("verified"):
+                session.resources["terraform_deployment"] = retry_result
+                session.add_event(
+                    DeploymentEvent(
+                        session_id=session.id,
+                        agent="deployer",
+                        severity="success",
+                        status=DeploymentStatus.succeeded,
+                        message=f"Auto-remediation succeeded on attempt {attempt}.",
+                        details=retry_result,
+                    )
+                )
+                self._add_chat_message(
+                    session,
+                    "assistant",
+                    f"I fixed and redeployed the infrastructure successfully on attempt {attempt}.",
+                )
+                self.persist_state(session)
+                return True
+
+            apply_result = retry_result
+            session.resources["last_apply_error"] = apply_result
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="error",
+                    status=DeploymentStatus.failed,
+                    message=f"Auto-remediation attempt {attempt} failed.",
+                    details=apply_result,
+                )
+            )
+            self._add_chat_message(
+                session,
+                "assistant",
+                f"Auto-remediation attempt {attempt} failed: {self._describe_deploy_issue(apply_result)}",
+            )
+            self.persist_state(session)
+
+        self._add_chat_message(
+            session,
+            "assistant",
+            "I could not auto-remediate after multiple attempts. Tell me `stop` to halt or provide updated requirements to continue.",
+        )
+        return False
 
     def _run_terraform_apply(self, session: DeploymentSession) -> dict[str, object]:
         if not session.spec or not session.repository_url:
@@ -451,6 +581,65 @@ class DeploymentWorkflow:
         )
         return result
 
+    def _run_terraform_destroy(self, session: DeploymentSession) -> dict[str, object]:
+        if not session.spec or not session.repository_url:
+            return {"destroyed": False, "error": "Missing completed spec or repository URL."}
+        github = self._github(session)
+        if not github.is_configured:
+            if self.settings.app_env == "local":
+                return {"destroyed": True, "dry_run": True}
+            return {"destroyed": False, "error": "GitHub token is required so CodeBuild can clone the generated repository."}
+
+        repo_full_name = self._repo_full_name(session.repository_url)
+        result_key = f"{session.spec.name}/{session.id}/deployments/terraform-destroy.json"
+        environment = [
+            {"name": "GITHUB_REPOSITORY", "value": repo_full_name, "type": "PLAINTEXT"},
+            {"name": "AWS_REGION", "value": session.spec.region, "type": "PLAINTEXT"},
+            {"name": "PROJECT_STATE_BUCKET", "value": self.settings.project_state_bucket, "type": "PLAINTEXT"},
+            {"name": "RESULT_KEY", "value": result_key, "type": "PLAINTEXT"},
+        ]
+        if self.settings.github_token_secret_arn:
+            environment.append({"name": "GITHUB_TOKEN", "value": self.settings.github_token_secret_arn, "type": "SECRETS_MANAGER"})
+        elif session.github_token or self.settings.github_token:
+            environment.append({"name": "GITHUB_TOKEN", "value": session.github_token or self.settings.github_token or "", "type": "PLAINTEXT"})
+
+        codebuild = boto3.client("codebuild", region_name=self.settings.aws_region)
+        build = codebuild.start_build(
+            projectName=self.settings.terraform_runner_project_name,
+            buildspecOverride=self._terraform_destroy_buildspec(),
+            environmentVariablesOverride=environment,
+        )["build"]
+        build_id = build["id"]
+        logs_url = build.get("logs", {}).get("deepLink")
+        session.resources["terraform_destroy"] = {
+            "build_id": build_id,
+            "logs_url": logs_url,
+            "result_s3_uri": f"s3://{self.settings.project_state_bucket}/{result_key}",
+        }
+
+        terminal_statuses = {"SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT"}
+        status = "IN_PROGRESS"
+        for _ in range(360):
+            current = codebuild.batch_get_builds(ids=[build_id])["builds"][0]
+            status = current["buildStatus"]
+            logs_url = current.get("logs", {}).get("deepLink") or logs_url
+            if status in terminal_statuses:
+                break
+            time.sleep(10)
+
+        result = self._read_deployment_result(result_key)
+        result.update(
+            {
+                "destroyed": bool(status == "SUCCEEDED" and result.get("destroyed")),
+                "codebuild_status": status,
+                "build_id": build_id,
+                "logs_url": logs_url,
+                "result_s3_uri": f"s3://{self.settings.project_state_bucket}/{result_key}",
+                "repository": repo_full_name,
+            }
+        )
+        return result
+
     def _read_deployment_result(self, key: str) -> dict[str, object]:
         try:
             response = self.archive.s3.get_object(Bucket=self.settings.project_state_bucket, Key=key)
@@ -482,12 +671,16 @@ phases:
       - |
         set +e
         cd repo/terraform
-        terraform apply -auto-approve -input=false
-        APPLY_EXIT=$?
+        set -o pipefail
+        terraform apply -auto-approve -input=false 2>&1 | tee /tmp/terraform-apply.log
+        APPLY_EXIT=${PIPESTATUS[0]}
         if [ "$APPLY_EXIT" -ne 0 ]; then
           python3 - <<'PY'
-import json, os
-payload = {"verified": False, "stage": "terraform_apply", "error": "terraform apply failed"}
+import json
+from pathlib import Path
+lines = Path("/tmp/terraform-apply.log").read_text(encoding="utf-8", errors="ignore").splitlines()
+tail = "\n".join(lines[-40:]) if lines else "No terraform apply logs available."
+payload = {"verified": False, "stage": "terraform_apply", "error": "terraform apply failed", "error_tail": tail}
 open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
 PY
           exit "$APPLY_EXIT"
@@ -598,15 +791,142 @@ PY
         fi
 """
 
+    def _terraform_destroy_buildspec(self) -> str:
+        return r"""version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
+        git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
+        cd repo/terraform
+        terraform init -input=false -reconfigure
+  build:
+    commands:
+      - |
+        set +e
+        cd repo/terraform
+        set -o pipefail
+        terraform destroy -auto-approve -input=false 2>&1 | tee /tmp/terraform-destroy.log
+        DESTROY_EXIT=${PIPESTATUS[0]}
+        if [ "$DESTROY_EXIT" -ne 0 ]; then
+          python3 - <<'PY'
+import json
+from pathlib import Path
+lines = Path("/tmp/terraform-destroy.log").read_text(encoding="utf-8", errors="ignore").splitlines()
+tail = "\n".join(lines[-40:]) if lines else "No terraform destroy logs available."
+payload = {"destroyed": False, "stage": "terraform_destroy", "error": "terraform destroy failed", "error_tail": tail}
+open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+PY
+          exit "$DESTROY_EXIT"
+        fi
+        python3 - <<'PY'
+import json
+import subprocess
+state_list = subprocess.run(["terraform", "state", "list"], capture_output=True, text=True)
+remaining = [line for line in state_list.stdout.splitlines() if line.strip()]
+payload = {"destroyed": len(remaining) == 0, "remaining_resources": remaining}
+open("/tmp/deployment-result.json", "w", encoding="utf-8").write(json.dumps(payload, indent=2))
+PY
+  post_build:
+    commands:
+      - |
+        if [ -f /tmp/deployment-result.json ]; then
+          aws s3 cp /tmp/deployment-result.json "s3://${PROJECT_STATE_BUCKET}/${RESULT_KEY}" --sse AES256
+        else
+          printf '{"destroyed": false, "error": "destroy result file was not produced"}' > /tmp/deployment-result.json
+          aws s3 cp /tmp/deployment-result.json "s3://${PROJECT_STATE_BUCKET}/${RESULT_KEY}" --sse AES256
+        fi
+"""
+
+    # ------------------------------------------------------------------ intent routing
+
+    def _classify_intent(self, message: str, session: DeploymentSession) -> str:
+        """Classify the user message into one of several intents."""
+        lower = message.lower().strip()
+
+        if self._is_stop_command(message):
+            return "stop"
+        if self._is_resume_command(message):
+            return "resume"
+
+        # Greetings
+        if self._is_greeting(message):
+            return "greeting"
+
+        # Approval
+        if self._is_approval(message) and session.status == DeploymentStatus.awaiting_approval:
+            return "approval"
+
+        # Destroy from chat
+        if any(w in lower for w in ("destroy", "delete this project", "tear down")):
+            if session.spec:
+                return "destroy"
+
+        # AWS read-only account query
+        aws_query_keywords = (
+            "show", "list", "what", "how many", "how much", "describe", "read",
+            "which", "get", "find", "display",
+        )
+        aws_resource_keywords = (
+            "bucket", "s3", "lambda", "function", "ec2", "instance", "vpc",
+            "rds", "database", "ecs", "ecr", "iam role", "alarm", "cloudwatch",
+            "cloudformation", "stack", "dynamodb", "table", "secret", "codebuild",
+            "sns", "sqs", "account", "region", "running", "resources in", "aws resources",
+        )
+        is_query = any(kw in lower for kw in aws_query_keywords) and any(kw in lower for kw in aws_resource_keywords)
+        if is_query:
+            return "aws_read"
+
+        # Update existing project
+        if session.spec and self._is_update_request(message, {}):
+            return "update"
+
+        # Infra creation if there are clear infra signals
+        infra_keywords = (
+            "create", "build", "provision", "deploy", "make", "setup", "spin up",
+            "new project", "new bucket", "new lambda", "new ec2", "new vpc",
+            "ec2-httpd", "s3-bucket", "s3-lambda", "vpc-baseline",
+        )
+        if any(kw in lower for kw in infra_keywords):
+            return "infra_create"
+
+        # If already collecting requirements, continue that flow
+        if session.resources.get("pending_answer_key"):
+            return "infra_create"
+
+        # If there are partially filled answers and no project yet, continue
+        answers = session.resources.get("chat_answers", {})
+        if not session.spec and answers.get("name"):
+            return "infra_create"
+
+        # Default: general LLM conversation
+        return "general_chat"
+
     async def chat(self, session: DeploymentSession, request: RequirementMessage) -> DeploymentSession:
         self._add_chat_message(session, "user", request.message)
         self._remember(session, "USER", request.message, {"stage": "chat"})
-        if self._is_greeting(request.message):
+
+        # Extract approval mode preference from any message
+        approval_mode = self._extract_approval_mode(request.message)
+        if approval_mode:
+            session.resources["approval_mode"] = approval_mode
+
+        intent = self._classify_intent(request.message, session)
+
+        # ---- GREETING ----
+        if intent == "greeting":
             message = (
-                "Hello, I am AI Agent for IaC orchestration. What can I do for you? "
-                "You can ask me to create or update AWS infrastructure, for example: "
-                "`create an EC2 web server in dev owner platform team cc1001`, "
-                "`create an encrypted S3 bucket`, or `update instance type to t3.small`."
+                "Hello! I am your AI Agent for AWS Infrastructure as Code orchestration.\n\n"
+                "Here is what I can do for you:\n"
+                "- **Create infrastructure** — S3 buckets, Lambda functions, EC2 instances, VPCs, and more\n"
+                "- **Update deployed projects** — change instance type, add encryption, update schedules\n"
+                "- **Read your AWS account** — list buckets, EC2 instances, Lambda functions, RDS, ECS, and any AWS resource\n"
+                "- **Manage deployments** — approve, destroy tracked project resources\n"
+                "- **Answer questions** — infrastructure best practices, AWS costs, architecture advice\n\n"
+                "What can I help you with today?"
             )
             self._add_chat_message(session, "assistant", message)
             session.add_event(
@@ -620,10 +940,42 @@ PY
             )
             self.persist_state(session)
             return session
-        approval_mode = self._extract_approval_mode(request.message)
-        if approval_mode:
-            session.resources["approval_mode"] = approval_mode
-        if self._is_approval(request.message) and session.status == DeploymentStatus.awaiting_approval:
+
+        # ---- STOP / HALT ----
+        if intent == "stop":
+            session.resources["halt_requested"] = True
+            session.resources.pop("auto_deploy_after_seconds", None)
+            session.resources.pop("auto_deploy_scheduled", None)
+            if session.resources.get("terraform_apply", {}).get("build_id"):
+                build_id = str(session.resources["terraform_apply"]["build_id"])
+                try:
+                    boto3.client("codebuild", region_name=self.settings.aws_region).stop_build(id=build_id)
+                    self._add_chat_message(session, "assistant", "Stop requested. I have signaled CodeBuild to stop the running Terraform job.")
+                except Exception:
+                    self._add_chat_message(session, "assistant", "Stop requested. I will halt further retries and workflow actions.")
+            else:
+                self._add_chat_message(session, "assistant", "Stop requested. I will halt further workflow actions.")
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="deployer",
+                    severity="warning",
+                    status=session.status,
+                    message="Workflow halted by user.",
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        # ---- RESUME ----
+        if intent == "resume":
+            session.resources["halt_requested"] = False
+            self._add_chat_message(session, "assistant", "Resumed. Tell me to continue deployment, update the project, or run a new request.")
+            self.persist_state(session)
+            return session
+
+        # ---- APPROVAL ----
+        if intent == "approval":
             session.approved = True
             session.add_event(
                 DeploymentEvent(
@@ -631,16 +983,76 @@ PY
                     agent="deployer",
                     severity="info",
                     status=DeploymentStatus.deploying,
-                    message="Approval received in chat. Deployment is starting.",
+                    message="Approval received in chat. Running Terraform apply and verifying AWS resources.",
                 )
             )
             session = await self.deploy(session)
             if session.status == DeploymentStatus.succeeded:
-                self._add_chat_message(session, "assistant", "Deployment is complete and AWS resources were verified. Review the repository, artifacts, and resource details on the right.")
+                self._add_chat_message(
+                    session, "assistant",
+                    "Deployment is complete and AWS resources were verified. "
+                    "You can view the GitHub repository and artifacts in the sidebar."
+                )
             else:
-                self._add_chat_message(session, "assistant", "Deployment did not verify successfully. Review the terminal logs and CodeBuild link in the deployment details.")
+                self._add_chat_message(
+                    session, "assistant",
+                    "Deployment did not verify successfully. Check the execution logs for the CodeBuild details."
+                )
             return session
 
+        # ---- DESTROY ----
+        if intent == "destroy":
+            self._add_chat_message(
+                session, "assistant",
+                f"I will destroy only the resources tracked in the project state for `{session.spec.name if session.spec else 'this project'}`. "
+                "Resources not tracked by this project state file will not be touched."
+            )
+            session = await self.destroy(session)
+            self._add_chat_message(session, "assistant", "Destroy completed for all tracked project resources.")
+            return session
+
+        # ---- AWS READ-ONLY QUERY ----
+        if intent == "aws_read":
+            self._add_thinking(session, "Reading your AWS account...")
+            region = session.spec.region if session.spec else self.settings.aws_region
+            result = query_aws_account(request.message, region)
+            self._add_chat_message(session, "assistant", result["answer"])
+            session.add_event(
+                DeploymentEvent(
+                    session_id=session.id,
+                    agent="requirements",
+                    severity="info",
+                    status=session.status,
+                    message=f"AWS read query answered: {request.message[:100]}",
+                    details={"item_count": len(result.get("data", []))},
+                )
+            )
+            self.persist_state(session)
+            return session
+
+        # ---- UPDATE EXISTING PROJECT ----
+        if intent == "update":
+            extracted = self._extract_chat_answers(request.message)
+            session = await self._update_existing_project(session, extracted, request.message)
+            return session
+
+        # ---- INFRA CREATE (full multi-step flow) ----
+        if intent == "infra_create":
+            return await self._handle_infra_create(session, request)
+
+        # ---- GENERAL LLM CHAT FALLBACK ----
+        return await self._handle_general_chat(session, request.message)
+
+    async def _handle_infra_create(
+        self,
+        session: DeploymentSession,
+        request: RequirementMessage,
+    ) -> DeploymentSession:
+        """Run the existing multi-step requirement → provision → compliance → approval flow."""
+        if session.resources.get("halt_requested"):
+            self._add_chat_message(session, "assistant", "Workflow is currently halted. Send `resume` to continue.")
+            self.persist_state(session)
+            return session
         answers = dict(session.resources.get("chat_answers", {}))
         self._merge_answers(answers, request.answers)
         extracted = self._extract_chat_answers(request.message)
@@ -648,31 +1060,18 @@ PY
         self._merge_answers(answers, extracted)
         session.resources["chat_answers"] = answers
 
-        if session.spec and self._is_update_request(request.message, extracted):
-            session = await self._update_existing_project(session, extracted, request.message)
-            return session
-
-        if session.spec and session.status == DeploymentStatus.succeeded:
-            message = (
-                "This project is already deployed and verified. Tell me what to update, for example "
-                "`update instance type to t3.small` or `change region to us-west-2`, and I will prepare a new GitHub diff."
-            )
-            self._add_chat_message(session, "assistant", message)
-            session.add_event(
-                DeploymentEvent(
-                    session_id=session.id,
-                    agent="requirements",
-                    severity="info",
-                    status=session.status,
-                    message="No update requested for an already deployed project.",
-                )
+        if session.spec and session.status == DeploymentStatus.succeeded and not self._is_update_request(request.message, extracted):
+            self._add_chat_message(
+                session, "assistant",
+                "This project is already deployed. Tell me what to change — for example "
+                "`update instance type to t3.small` or `enable versioning` — and I will regenerate Terraform and prepare a new diff."
             )
             self.persist_state(session)
             return session
 
         missing = [key for key in ("name", "description", "owner", "cost_center") if not answers.get(key)]
         if missing:
-            question = self._missing_question(missing[0])
+            question = self._missing_question(missing[0], answers)
             self._add_chat_message(session, "assistant", question)
             session.resources["pending_answer_key"] = missing[0]
             session.add_event(
@@ -688,23 +1087,39 @@ PY
             self.persist_state(session)
             return session
 
+        service_question = self._service_requirements_question(answers, request.message)
+        if service_question and not answers.get(service_question["id"]):
+            self._add_chat_message(session, "assistant", service_question["question"])
+            session.resources["pending_answer_key"] = service_question["id"]
+            session.resources["service_question_asked"] = service_question["id"]
+            self.persist_state(session)
+            return session
+
+        service_notes = [value for key, value in answers.items() if key.startswith("service_") and value]
+        if service_notes and "service details:" not in answers.get("description", "").lower():
+            answers["description"] = (
+                f"{answers.get('description', '').strip()} "
+                f"Service details: {'; '.join(service_notes)}"
+            ).strip()
+
+        self._add_thinking(session, "Analyzing requirements...")
         session = await self.gather_requirements(session, RequirementMessage(message=request.message, answers=answers))
         if not session.spec:
             return session
-        self._add_chat_message(
-            session,
-            "assistant",
-            self._implementation_plan(session.spec),
-        )
+
+        self._add_chat_message(session, "assistant", self._implementation_plan(session.spec))
+        self._add_thinking(session, "Generating Terraform and documentation...")
         session = await self.provision(session)
         if session.status == DeploymentStatus.failed:
             return session
+
+        self._add_thinking(session, "Running compliance checks...")
         session = await self.run_compliance(session)
         if session.status == DeploymentStatus.awaiting_approval:
             mode = session.resources.get("approval_mode", "auto")
             if mode == "skip":
                 session.approved = True
-                self._add_chat_message(session, "assistant", "Approval was skipped by request. Deployment is starting now.")
+                self._add_chat_message(session, "assistant", "Skipping approval as requested. Starting deployment now.")
                 session.add_event(
                     DeploymentEvent(
                         session_id=session.id,
@@ -716,21 +1131,21 @@ PY
                 )
                 session = await self.deploy(session)
                 if session.status == DeploymentStatus.succeeded:
-                    self._add_chat_message(session, "assistant", "Deployment is complete and AWS resources were verified. Review the repository, artifacts, and resource details on the right.")
+                    self._add_chat_message(session, "assistant", "Deployment is complete and AWS resources were verified.")
                 else:
-                    self._add_chat_message(session, "assistant", "Deployment did not verify successfully. Review the terminal logs and CodeBuild link in the deployment details.")
+                    self._add_chat_message(session, "assistant", "Deployment did not verify successfully. Check the execution logs.")
                 return session
             if mode == "manual":
                 approval_message = (
                     "Architecture, Terraform, and compliance checks are ready. "
-                    "I will wait for approval. Type `approve` when you want to deploy."
+                    "I will wait here for your approval. Type `approve` or click the Approve button when ready."
                 )
             else:
                 session.resources["auto_deploy_after_seconds"] = 180
                 approval_message = (
                     "Architecture, Terraform, and compliance checks are ready. "
-                    "Review the GitHub links and type `approve` to deploy now. "
-                    "If there is no response, I will auto-deploy in about 3 minutes."
+                    "Review the GitHub repository and click **Approve & Deploy** to proceed. "
+                    "I will auto-deploy in about 3 minutes if there is no response."
                 )
             self._add_chat_message(session, "assistant", approval_message)
             session.add_event(
@@ -750,6 +1165,74 @@ PY
             )
             self.persist_state(session)
         return session
+
+    async def _handle_general_chat(self, session: DeploymentSession, message: str) -> DeploymentSession:
+        """General LLM conversation fallback for anything not handled by specialized agents."""
+        self._add_thinking(session, "Thinking...")
+
+        # Build conversation context from recent chat history
+        chat_history = session.resources.get("chat_messages", [])
+        history_text = "\n".join(
+            f"{m['role'].upper()}: {m['content']}"
+            for m in chat_history[-10:]
+            if m.get("role") in {"user", "assistant"}
+        )
+
+        project_context = ""
+        if session.spec:
+            project_context = (
+                f"\nCurrent project: {session.spec.name} ({session.spec.workload_type}) "
+                f"in {session.spec.region}/{session.spec.environment}, status={session.status}"
+            )
+
+        system_prompt = (
+            "You are an expert AWS infrastructure AI assistant integrated with an IaC orchestration platform. "
+            "You can answer questions about AWS services, infrastructure best practices, costs, security, and architecture. "
+            "You can also help users understand their deployed projects. "
+            "When a user wants to create or update infrastructure, tell them to describe what they want built. "
+            "When a user asks about their AWS account resources, tell them you can query S3, Lambda, EC2, VPCs, RDS, ECS, IAM, etc. "
+            "Be concise, helpful, and conversational. Do not generate Terraform or code unless specifically asked."
+        )
+        user_prompt = (
+            f"{history_text}\n{project_context}\n\nUSER: {message}"
+            if history_text or project_context
+            else message
+        )
+
+        try:
+            from common.llm import ask_llm_text  # noqa: PLC0415
+            response = ask_llm_text(system_prompt, user_prompt, max_tokens=1500)
+        except Exception:
+            response = None
+
+        if not response:
+            response = (
+                "I am your AWS infrastructure assistant. I can help you:\n"
+                "- Create infrastructure (EC2, S3, Lambda, VPC, etc.)\n"
+                "- Update and manage deployed projects\n"
+                "- Query your AWS account resources (read-only)\n"
+                "- Answer questions about AWS and infrastructure best practices\n\n"
+                "What would you like to do?"
+            )
+
+        self._add_chat_message(session, "assistant", response)
+        session.add_event(
+            DeploymentEvent(
+                session_id=session.id,
+                agent="requirements",
+                severity="info",
+                status=session.status,
+                message=f"General LLM response for: {message[:100]}",
+            )
+        )
+        self.persist_state(session)
+        return session
+
+    def _add_thinking(self, session: DeploymentSession, message: str) -> None:
+        """Add a transient thinking/progress message visible in the chat."""
+        messages = list(session.resources.get("chat_messages", []))
+        messages.append({"role": "thinking", "content": message})
+        session.resources["chat_messages"] = messages[-40:]
 
     async def _update_existing_project(
         self,
@@ -906,6 +1389,10 @@ PY
         return session
 
     async def destroy(self, session: DeploymentSession) -> DeploymentSession:
+        if session.resources.get("halt_requested"):
+            self._add_chat_message(session, "assistant", "Destroy is halted by user request. Send `resume` to continue.")
+            self.persist_state(session)
+            return session
         session.add_event(
             DeploymentEvent(
                 session_id=session.id,
@@ -915,7 +1402,24 @@ PY
                 message="Destroy started for resources tracked by this project.",
             )
         )
-        if session.resources.get("ec2_httpd"):
+        if session.spec and session.repository_url:
+            result = self._run_terraform_destroy(session)
+            session.resources["terraform_destroy"] = result
+            if not result.get("destroyed"):
+                session.add_event(
+                    DeploymentEvent(
+                        session_id=session.id,
+                        agent="destroyer",
+                        severity="error",
+                        status=DeploymentStatus.failed,
+                        message="Terraform destroy failed for tracked project resources.",
+                        details=result,
+                    )
+                )
+                self._add_chat_message(session, "assistant", self._describe_deploy_issue(result))
+                self.persist_state(session)
+                return session
+        elif session.resources.get("ec2_httpd"):
             result = self.ec2_httpd.destroy(session.resources["ec2_httpd"])
             session.resources["ec2_httpd_destroy"] = result
         elif session.resources.get("s3_bucket"):
@@ -1015,6 +1519,18 @@ PY
             answers["workload_type"] = "ec2-httpd"
         elif "s3 bucket" in lower or "bucket" in lower:
             answers["workload_type"] = "s3-bucket"
+        elif "vpc" in lower or "subnet" in lower:
+            answers["workload_type"] = "vpc-baseline"
+        elif any(token in lower for token in ("lambda", "api gateway", "apigateway", "serverless")):
+            answers["workload_type"] = "s3-lambda-api"
+        elif "rds" in lower:
+            answers["workload_type"] = "rds"
+        elif "dynamodb" in lower:
+            answers["workload_type"] = "dynamodb"
+        elif "ecs" in lower:
+            answers["workload_type"] = "ecs"
+        elif "eks" in lower:
+            answers["workload_type"] = "eks"
         return answers
 
     def _apply_pending_answer(
@@ -1027,6 +1543,11 @@ PY
         pending = session.resources.get("pending_answer_key")
         value = message.strip()
         if not pending or not value or extracted.get(str(pending)):
+            return
+        if str(pending).startswith("service_"):
+            if len(value.split()) <= 60:
+                answers[str(pending)] = value
+                session.resources.pop("pending_answer_key", None)
             return
         if len(value.split()) <= 6:
             answers[str(pending)] = value
@@ -1055,6 +1576,14 @@ PY
 
     def _is_approval(self, message: str) -> bool:
         return message.strip().lower() in {"approve", "approved", "yes", "go", "deploy", "proceed"}
+
+    def _is_stop_command(self, message: str) -> bool:
+        lower = message.strip().lower()
+        return any(term in lower for term in {"stop", "halt", "cancel deployment", "pause deployment", "abort"})
+
+    def _is_resume_command(self, message: str) -> bool:
+        lower = message.strip().lower()
+        return any(term in lower for term in {"resume", "continue", "restart deployment", "unpause"})
 
     def _is_greeting(self, message: str) -> bool:
         normalized = re.sub(r"[^a-z ]", "", message.lower()).strip()
@@ -1085,11 +1614,40 @@ PY
         lower = description.lower()
         return any(term in lower for term in ("pem", "ssh key", "key pair", "private key"))
 
-    def _missing_question(self, key: str) -> str:
+    def _missing_question(self, key: str, answers: dict[str, str] | None = None) -> str:
+        answers = answers or {}
+        workload = answers.get("workload_type", "")
         questions = {
             "name": "What project name should I use?",
-            "description": "Please describe what you want this project to build.",
+            "description": (
+                "Please describe what you want this project to build "
+                "(for example: service type, traffic pattern, private/public, and expected scale)."
+            ),
             "owner": "Who is the owner email or team for this project?",
             "cost_center": "What cost center should I tag on the resources?",
         }
+        if key == "description" and workload == "ec2-httpd":
+            return "Describe your EC2 app (public/private, expected traffic, and instance size if known)."
+        if key == "description" and workload == "s3-bucket":
+            return "Describe your S3 use case (documents/logs/backups, retention, and access pattern)."
         return questions[key]
+
+    def _service_requirements_question(self, answers: dict[str, str], message: str) -> dict[str, str] | None:
+        lower = f"{message.lower()} {answers.get('description', '').lower()}"
+        prompts = [
+            ("lambda", "service_lambda_requirements", "For Lambda, what runtime, timeout, and trigger type do you want (API, schedule, SQS, or S3)?"),
+            ("ec2", "service_ec2_requirements", "For EC2, should it be public or private, and what instance size/OS do you prefer?"),
+            ("s3", "service_s3_requirements", "For S3, do you need versioning, lifecycle retention, and encryption with KMS or AES256?"),
+            ("rds", "service_rds_requirements", "For RDS, what engine (postgres/mysql), expected size, backup retention, and public/private access?"),
+            ("dynamodb", "service_dynamodb_requirements", "For DynamoDB, what table keys do you need and expected read/write capacity pattern?"),
+            ("vpc", "service_vpc_requirements", "For VPC, how many AZs/public/private subnets and do you need NAT gateways?"),
+            ("ecs", "service_ecs_requirements", "For ECS, do you want Fargate or EC2 launch type, desired task count, and ALB exposure?"),
+            ("eks", "service_eks_requirements", "For EKS, what node sizing, scaling limits, and public/private endpoint preference?"),
+            ("sns", "service_sns_requirements", "For SNS, what topic type and subscription endpoints (email/http/sqs) do you need?"),
+            ("sqs", "service_sqs_requirements", "For SQS, do you need standard or FIFO queue, and what visibility timeout / DLQ policy?"),
+            ("apigateway", "service_apigw_requirements", "For API Gateway, should it be public or private, and do you need custom domain + auth?"),
+        ]
+        for token, key, question in prompts:
+            if token in lower:
+                return {"id": key, "question": question}
+        return None

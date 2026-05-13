@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     company_standards_path: str = "./samples/company-standards.md"
     project_state_bucket: str = "hack-aib-tf-backend"
     terraform_runner_project_name: str = "agentcore-deployer-dev-terraform-runner"
+    max_auto_remediation_retries: int = 5
     agentcore_memory_id: str | None = None
 
     agentcore_requirement_runtime_arn: str | None = None

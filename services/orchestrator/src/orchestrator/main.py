@@ -152,6 +152,26 @@ async def compliance(session_id: str) -> dict[str, object]:
     return store.save(updated).model_dump(mode="json")
 
 
+@app.post("/sessions/{session_id}/clear")
+def clear_session(session_id: str) -> dict[str, object]:
+    """Reset chat history and answers in an existing session (keeps project if deployed)."""
+    session = store.get(session_id)
+    session.resources.pop("chat_messages", None)
+    session.resources.pop("chat_answers", None)
+    session.resources.pop("pending_answer_key", None)
+    session.resources.pop("agent_feedback", None)
+    session.add_event(
+        DeploymentEvent(
+            session_id=session.id,
+            agent="requirements",
+            severity="info",
+            status=session.status,
+            message="Chat history cleared by user.",
+        )
+    )
+    return store.save(session).model_dump(mode="json")
+
+
 @app.post("/sessions/{session_id}/approve")
 def approve(session_id: str) -> dict[str, object]:
     session = store.get(session_id)

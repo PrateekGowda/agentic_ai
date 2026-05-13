@@ -10,6 +10,18 @@ REQUIRED_FIELDS = {
     "cost_center": "Cost center",
 }
 
+SERVICE_PROMPTS = {
+    "lambda": "For Lambda, share runtime, trigger type (API/S3/SQS/EventBridge), timeout, and memory.",
+    "ec2": "For EC2, share instance size, OS, public/private access, and expected traffic.",
+    "s3": "For S3, share versioning, retention/lifecycle, and encryption preference (AES256/KMS).",
+    "rds": "For RDS, share engine, size, backup retention, and public/private access.",
+    "dynamodb": "For DynamoDB, share table keys and throughput pattern (on-demand/provisioned).",
+    "vpc": "For VPC, share AZ count, public/private subnet layout, and NAT requirements.",
+    "ecs": "For ECS, share launch type (Fargate/EC2), desired count, and load balancer needs.",
+    "eks": "For EKS, share node sizing, scaling limits, and endpoint exposure preferences.",
+    "apigateway": "For API Gateway, share auth type, custom domain requirement, and private/public exposure.",
+}
+
 
 def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
     answers = dict(payload.get("answers", {}))
@@ -23,6 +35,7 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
     missing = [label for key, label in REQUIRED_FIELDS.items() if not answers.get(key)]
 
     if missing:
+        service_prompt = _service_prompt(message)
         return {
             "message": "I need a few details before generating infrastructure.",
             "data": {
@@ -35,7 +48,17 @@ def handle_requirement_message(payload: dict[str, Any]) -> dict[str, Any]:
                     }
                     for key, label in REQUIRED_FIELDS.items()
                     if not answers.get(key)
-                ],
+                ] + (
+                    [
+                        {
+                            "id": "service_details",
+                            "label": service_prompt,
+                            "required": False,
+                        }
+                    ]
+                    if service_prompt
+                    else []
+                ),
             },
         }
 
@@ -75,7 +98,23 @@ def _normalize_answers(answers: dict[str, Any]) -> None:
         answers["compliance_profile"] = "baseline"
     if answers.get("github_visibility") not in {"private", "internal", "public"}:
         answers["github_visibility"] = "private"
-    if answers.get("workload_type") not in {"s3-lambda-api", "vpc-baseline", "ec2-httpd", "s3-bucket"}:
+    supported = {
+        "s3-lambda-api",
+        "vpc-baseline",
+        "ec2-httpd",
+        "s3-bucket",
+        "lambda",
+        "rds",
+        "dynamodb",
+        "ecs",
+        "eks",
+        "apigateway",
+        "sns",
+        "sqs",
+    }
+    if not answers.get("workload_type"):
+        answers["workload_type"] = _infer_workload(str(answers.get("description", "")))
+    elif str(answers.get("workload_type")) not in supported:
         answers["workload_type"] = _infer_workload(str(answers.get("description", "")))
 
 
@@ -97,11 +136,37 @@ def _extract_answers_with_llm(message: str, existing: dict[str, Any]) -> dict[st
 
 
 def _infer_workload(message: str) -> str:
+    if "eks" in message:
+        return "eks"
+    if "ecs" in message:
+        return "ecs"
+    if "rds" in message or "postgres" in message or "mysql" in message:
+        return "rds"
+    if "dynamodb" in message:
+        return "dynamodb"
+    if "apigateway" in message or "api gateway" in message:
+        return "apigateway"
+    if "sns" in message:
+        return "sns"
+    if "sqs" in message:
+        return "sqs"
     if "ec2" in message or "httpd" in message:
         return "ec2-httpd"
+    if "vpc" in message or "subnet" in message:
+        return "vpc-baseline"
+    if "lambda" in message or "api gateway" in message or "serverless" in message:
+        return "s3-lambda-api"
     if "s3 bucket" in message or "bucket" in message:
         return "s3-bucket"
     return "s3-lambda-api"
+
+
+def _service_prompt(message: str) -> str | None:
+    lower = message.lower()
+    for token, prompt in SERVICE_PROMPTS.items():
+        if token in lower:
+            return prompt
+    return None
 
 
 def _extract_answers(message: str) -> dict[str, str]:

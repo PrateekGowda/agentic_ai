@@ -80,3 +80,46 @@ def test_session_github_token_is_not_returned():
 
     assert updated["github_token_configured"] is True
     assert "github_token" not in updated
+
+
+def test_chat_clear_and_stop_resume_flow():
+    client = TestClient(app)
+    session = client.post("/sessions").json()
+    session_id = session["id"]
+
+    chatted = client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "hello", "answers": {}},
+    ).json()
+    assert chatted["resources"]["chat_messages"]
+
+    stopped = client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "stop", "answers": {}},
+    ).json()
+    assert stopped["resources"]["halt_requested"] is True
+
+    resumed = client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "resume", "answers": {}},
+    ).json()
+    assert resumed["resources"]["halt_requested"] is False
+
+    cleared = client.post(f"/sessions/{session_id}/clear").json()
+    assert "chat_messages" not in cleared.get("resources", {})
+
+
+def test_aws_read_only_query_is_handled_in_chat():
+    client = TestClient(app)
+    session = client.post("/sessions").json()
+    session_id = session["id"]
+
+    queried = client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "read aws resources in this account", "answers": {}},
+    ).json()
+    chat_messages = queried.get("resources", {}).get("chat_messages", [])
+    assert any(
+        m.get("role") == "assistant" and ("AWS Account" in m.get("content", "") or "Could not retrieve account info" in m.get("content", ""))
+        for m in chat_messages
+    )

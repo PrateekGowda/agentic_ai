@@ -12,7 +12,7 @@ export type DeploymentStatus =
   | "blocked"
   | "destroyed";
 
-export type AgentName = "requirements" | "provisioner" | "deployer" | "compliance" | "destroyer";
+export type AgentName = "requirements" | "provisioner" | "deployer" | "compliance" | "destroyer" | "aws_readonly" | "general";
 export type EventSeverity = "info" | "warning" | "error" | "success";
 
 export interface DeploymentSpec {
@@ -21,7 +21,7 @@ export interface DeploymentSpec {
   cloud: "aws";
   region: string;
   environment: Environment;
-  workload_type: "s3-lambda-api" | "vpc-baseline" | "ec2-httpd" | "s3-bucket";
+  workload_type: string;
   owner: string;
   cost_center: string;
   compliance_profile: "baseline" | "regulated";

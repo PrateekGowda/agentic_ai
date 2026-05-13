@@ -93,6 +93,8 @@ def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
             "\"backend.tf\":\"...\",\"main.tf\":\"...\"}}. Use the S3 backend bucket "
             "hack-aib-tf-backend. Do not include secrets or private keys. For EC2, prefer SSM Session "
             "Manager and include aws_instance. For S3, include public access block, versioning, and encryption. "
+            "If requirements are incomplete, infer secure defaults using AWS Well-Architected practices. "
+            "Prefer reusable official/community Terraform module patterns where applicable. "
             f"Request spec: {spec}"
         ),
     )

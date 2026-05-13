@@ -1,254 +1,535 @@
 "use client";
 
-import type { DeploymentEvent, DeploymentSession, DeploymentStatus } from "@agentcore-deployer/contracts";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import type { DeploymentSession } from "@repo/contracts";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-const processSteps: { label: string; statuses: DeploymentStatus[] }[] = [
-  { label: "Requirement gathering", statuses: ["requirements", "customizing"] },
-  { label: "Architecture and Terraform generation", statuses: ["customizing", "repo_created"] },
-  { label: "GitHub repository create/read/update", statuses: ["repo_created"] },
-  { label: "Compliance check", statuses: ["policy_check", "awaiting_approval", "blocked"] },
-  { label: "Chat approval", statuses: ["awaiting_approval"] },
-  { label: "Deployment", statuses: ["deploying", "succeeded"] },
-  { label: "Project documentation", statuses: ["succeeded"] },
-];
+interface ChatMessage {
+  role: "user" | "assistant" | "thinking";
+  content: string;
+}
+
+interface SessionMeta {
+  id: string;
+  label: string;
+  status: string;
+  projectName?: string;
+}
+
+const BASE = "/api/backend";
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+async function apiPost(path: string, body?: object) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`API ${BASE}${path} → ${res.status}`);
+  return res.json();
+}
+
+async function apiGet(path: string) {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) throw new Error(`API ${BASE}${path} → ${res.status}`);
+  return res.json();
+}
+
+function statusBadge(status: string) {
+  const map: Record<string, string> = {
+    succeeded: "bg-green-600",
+    failed: "bg-red-600",
+    deploying: "bg-blue-500",
+    awaiting_approval: "bg-yellow-500",
+    requirements: "bg-gray-500",
+    destroyed: "bg-purple-600",
+  };
+  return map[status] ?? "bg-gray-400";
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [session, setSession] = useState<DeploymentSession | null>(null);
-  const [projects, setProjects] = useState<DeploymentSession[]>([]);
-  const [chatMessage, setChatMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const chatMessages = (session?.resources?.chat_messages as { role: string; content: string }[] | undefined) ?? [];
-  const awaitingApproval = session?.status === "awaiting_approval";
+  // Session list (sidebar)
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
-  useEffect(() => {
-    refreshProjects().catch(() => undefined);
+  // Active session detail
+  const [session, setSession] = useState<DeploymentSession | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Input state
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Refs for scroll
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  const scrollToBottom = useCallback(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
-  useEffect(() => {
-    if (!session?.id) return;
-    const timer = window.setInterval(async () => {
-      const updated = await call<DeploymentSession>(`/sessions/${session.id}`, { quiet: true } as RequestInit & { quiet?: boolean });
-      setSession(updated);
-      setProjects((current) => [updated, ...current.filter((project) => project.id !== updated.id)]);
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [session?.id]);
+  const syncMessages = useCallback((data: DeploymentSession) => {
+    const raw: ChatMessage[] = (data.resources?.chat_messages ?? []) as ChatMessage[];
+    setMessages(raw);
+    scrollToBottom();
+  }, [scrollToBottom]);
 
-  async function call<T>(path: string, init?: RequestInit & { quiet?: boolean }): Promise<T> {
-    const { quiet: quietFlag, ...requestInit } = init ?? {};
-    if (!quietFlag) setBusy(true);
+  const loadSessionDetail = useCallback(async (id: string) => {
     try {
-      const response = await fetch(`${apiBaseUrl}${path}`, {
-        headers: { "Content-Type": "application/json", ...requestInit.headers },
-        ...requestInit,
-      });
-      if (!response.ok) throw new Error(await response.text());
-      return (await response.json()) as T;
-    } finally {
-      if (!quietFlag) setBusy(false);
+      const data: DeploymentSession = await apiGet(`/sessions/${id}`);
+      setSession(data);
+      syncMessages(data);
+    } catch {
+      /* ignore */
     }
-  }
+  }, [syncMessages]);
 
-  async function refreshProjects() {
-    setProjects(await call<DeploymentSession[]>("/sessions"));
-  }
+  const refreshSessions = useCallback(async () => {
+    try {
+      const data: DeploymentSession[] = await apiGet(`/sessions`);
+      const metas: SessionMeta[] = data
+        .slice()
+        .reverse()
+        .map((s) => ({
+          id: s.id,
+          label: s.spec?.name ?? `Session ${s.id.slice(0, 8)}`,
+          status: s.status,
+          projectName: s.spec?.name,
+        }));
+      setSessions(metas);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
-  async function ensureSession() {
-    const current = session ?? (await call<DeploymentSession>("/sessions", { method: "POST" }));
-    setSession(current);
-    await refreshProjects();
-    return current;
-  }
+  // ── Initial load ──────────────────────────────────────────────────────────
 
-  async function sendChat() {
-    const current = await ensureSession();
-    const updated = await call<DeploymentSession>(`/sessions/${current.id}/chat`, {
-      method: "POST",
-      body: JSON.stringify({ message: chatMessage, answers: {} }),
-    });
-    setSession(updated);
-    setNotice("Chat sent. If approval is needed, type approve after reviewing the GitHub architecture and logs.");
-    setChatMessage("");
-    await refreshProjects();
-  }
+  useEffect(() => {
+    refreshSessions();
+    const interval = setInterval(refreshSessions, 8000);
+    return () => clearInterval(interval);
+  }, [refreshSessions]);
 
-  async function approveDeployment() {
-    if (!session) return;
-    const updated = await call<DeploymentSession>(`/sessions/${session.id}/chat`, {
-      method: "POST",
-      body: JSON.stringify({ message: "approve", answers: {} }),
-    });
-    setSession(updated);
-    setNotice("Approval sent. Terraform apply is running and resources will be verified before the project is marked complete.");
-    await refreshProjects();
-  }
+  useEffect(() => {
+    if (!activeId) return;
+    loadSessionDetail(activeId);
+    const interval = setInterval(() => loadSessionDetail(activeId), 3000);
+    return () => clearInterval(interval);
+  }, [activeId, loadSessionDetail]);
 
-  async function destroyProject(project = session) {
-    if (!project || !confirm("Destroy resources tracked by this project?")) return;
-    const updated = await call<DeploymentSession>(`/sessions/${project.id}/destroy`, { method: "POST" });
-    setSession(updated);
-    await refreshProjects();
-  }
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
 
-  function stepState(step: { statuses: DeploymentStatus[] }, events: DeploymentEvent[]) {
-    if (!session) return "pending";
-    if (events.some((event) => event.severity === "error" && step.statuses.includes(event.status))) return "failed";
-    if (events.some((event) => step.statuses.includes(event.status))) return "done";
-    return "pending";
-  }
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const createSession = async () => {
+    try {
+      const data: DeploymentSession = await apiPost(`/sessions`);
+      const meta: SessionMeta = {
+        id: data.id,
+        label: `New session`,
+        status: data.status,
+      };
+      setSessions((prev) => [meta, ...prev]);
+      setActiveId(data.id);
+      setSession(data);
+      setMessages([
+        {
+          role: "assistant",
+          content:
+            "Hello! I am your AWS Infrastructure AI Agent.\n\n" +
+            "I can help you:\n" +
+            "• **Create infrastructure** — S3, Lambda, EC2, VPC, RDS and more\n" +
+            "• **Update projects** — change configs, instance types, regions\n" +
+            "• **Query your AWS account** — list buckets, instances, functions (read-only)\n" +
+            "• **Manage deployments** — approve, destroy tracked resources\n" +
+            "• **Answer questions** — architecture advice, best practices, cost estimates\n\n" +
+            "What would you like to do?",
+        },
+      ]);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const selectSession = async (id: string) => {
+    setActiveId(id);
+    await loadSessionDetail(id);
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || busy || !activeId) return;
+    const text = input.trim();
+    setInput("");
+    setBusy(true);
+
+    // Optimistically add user message
+    setMessages((prev) => [...prev, { role: "user", content: text }]);
+    // Show thinking bubble
+    setMessages((prev) => [...prev, { role: "thinking", content: "Thinking..." }]);
+    scrollToBottom();
+
+    try {
+      const data: DeploymentSession = await apiPost(`/sessions/${activeId}/chat`, {
+        message: text,
+        answers: {},
+      });
+      setSession(data);
+      syncMessages(data);
+      await refreshSessions();
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev.filter((m) => m.role !== "thinking"),
+        { role: "assistant", content: "Sorry, I encountered an error. Please try again." },
+      ]);
+    } finally {
+      setBusy(false);
+      textareaRef.current?.focus();
+    }
+  };
+
+  const approveDeployment = async () => {
+    if (!activeId || busy) return;
+    setBusy(true);
+    setMessages((prev) => [...prev, { role: "thinking", content: "Running Terraform apply and verifying AWS resources..." }]);
+    try {
+      await apiPost(`/sessions/${activeId}/approve`);
+      const deployed: DeploymentSession = await apiPost(`/sessions/${activeId}/deploy`);
+      setSession(deployed);
+      syncMessages(deployed);
+      await refreshSessions();
+    } catch {
+      setMessages((prev) => [
+        ...prev.filter((m) => m.role !== "thinking"),
+        { role: "assistant", content: "Approval was sent but deployment encountered an error." },
+      ]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopCurrentRun = async () => {
+    if (!activeId || busy === false) return;
+    try {
+      const data: DeploymentSession = await apiPost(`/sessions/${activeId}/chat`, {
+        message: "stop",
+        answers: {},
+      });
+      setSession(data);
+      syncMessages(data);
+      setBusy(false);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Unable to stop right now. Please try again." },
+      ]);
+    }
+  };
+
+  const clearChat = async () => {
+    if (!activeId) return;
+    try {
+      const data: DeploymentSession = await apiPost(`/sessions/${activeId}/clear`);
+      setSession(data);
+      setMessages([]);
+    } catch {
+      setMessages([]);
+    }
+  };
+
+  const destroySession = async (id: string) => {
+    if (!confirm("Destroy all tracked project resources? This cannot be undone.")) return;
+    try {
+      await apiPost(`/sessions/${id}/destroy`);
+      await refreshSessions();
+      if (activeId === id) loadSessionDetail(id);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const awaitingApproval = session?.status === "awaiting_approval";
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <main className="shell">
-      <section className="stack" style={{ marginBottom: 24 }}>
-        <div className="row">
-          <h1 style={{ margin: 0 }}>AgentCore Multi-Agent Deployer</h1>
-          <span className="status">{session?.status ?? "not_started"}</span>
-          <a className="button secondary" href="/projects">
-            Existing Projects Page
-          </a>
-          <a className="button secondary" href="/admin">
-            Admin
-          </a>
+    <div className="app-shell">
+      {/* ──── SIDEBAR ──── */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <span className="sidebar-logo">⚡ IaC Agent</span>
         </div>
-        <p className="muted" style={{ maxWidth: 860 }}>
-          Chat with the agents to collect inputs, create architecture and Terraform, push code/docs to GitHub,
-          approve deployment, create resources, and view project history.
-        </p>
-      </section>
 
-      <section className="panel stack" style={{ marginBottom: 24 }}>
-        <h2>Chatbot</h2>
-        <div className="chatWindow">
-          {chatMessages.length ? (
-            chatMessages.map((message, index) => (
-              <div key={`${message.role}-${index}`} className={`chatBubble ${message.role === "user" ? "user" : "assistant"}`}>
-                <strong>{message.role === "user" ? "You" : "Agent"}</strong>
-                <p>{message.content}</p>
-              </div>
-            ))
-          ) : (
-            <div className="chatBubble assistant">
-              <strong>Agent</strong>
-              <p>
-                Hello, I am AI Agent for IaC orchestration. What can I do for you? Ask naturally, and I will collect
-                missing details, generate Terraform, validate it, update GitHub, and deploy after approval.
-              </p>
-            </div>
+        <button className="new-chat-btn" onClick={createSession}>
+          + New Chat
+        </button>
+
+        <div className="session-list">
+          {sessions.length === 0 && (
+            <p className="session-empty">No sessions yet. Start a new chat!</p>
           )}
-          {busy ? (
-            <div className="chatBubble assistant">
-              <strong>Agent</strong>
-              <p>Working with the agents. I will update the logs as each step completes...</p>
-            </div>
-          ) : null}
-        </div>
-        <label className="field">
-          Tell the agents what to build
-          <textarea
-            value={chatMessage}
-            onChange={(event) => setChatMessage(event.target.value)}
-            rows={4}
-            placeholder="Create an S3 bucket in us-east-1 dev, project demo-s3, owner platform team, cc1001"
-          />
-        </label>
-        <div className="row">
-          <button className="button secondary" onClick={ensureSession} disabled={busy}>
-            New / Select Session
-          </button>
-          <button className="button" onClick={sendChat} disabled={busy || !chatMessage.trim()}>
-            {busy ? "Agents Working..." : "Send To Agent"}
-          </button>
-          <button className="button iconButton" onClick={sendChat} disabled={busy || !chatMessage.trim()} aria-label="Send message to agent">
-            <span aria-hidden="true">↑</span>
-          </button>
-          <button className="button secondary" onClick={approveDeployment} disabled={!awaitingApproval || busy}>
-            {busy && awaitingApproval ? "Deploying..." : "Approve & Deploy"}
-          </button>
-          <button className="button secondary" onClick={() => destroyProject()} disabled={!session || busy}>
-            Destroy Project
-          </button>
-        </div>
-        <p className="muted">
-          Test case: ask `Create an S3 bucket in us-east-1 dev. Project name is ui-s3-demo. Owner platform@example.com. Cost center CC-1001.`
-        </p>
-        {notice ? <p className="status">{notice}</p> : null}
-      </section>
-
-      <div className="grid">
-        <section className="stack">
-          <section className="panel stack">
-            <h2>Step-By-Step Process</h2>
-            {processSteps.map((step) => (
-              <div key={step.label} className={`event ${stepState(step, session?.events ?? []) === "done" ? "success" : "info"}`}>
-                <strong>{step.label}</strong>
-                <p className="muted">{stepState(step, session?.events ?? [])}</p>
-              </div>
-            ))}
-          </section>
-
-          <section className="panel stack">
-            <h2>Existing Projects</h2>
-            <button className="button secondary" onClick={refreshProjects} disabled={busy}>
-              Refresh Projects
-            </button>
-            {projects.length ? (
-              projects.map((project) => (
-                <div key={project.id} className="event">
-                  <button className="button secondary" style={{ textAlign: "left" }} onClick={() => setSession(project)}>
-                    {(project.spec?.name ?? project.id.slice(0, 8))} - {project.status}
+          {sessions.map((s) => (
+            <div
+              key={s.id}
+              className={`session-item ${activeId === s.id ? "session-item-active" : ""}`}
+              onClick={() => selectSession(s.id)}
+            >
+              <div className="session-item-name">{s.label}</div>
+              <div className="session-item-footer">
+                <span className={`status-dot ${statusBadge(s.status)}`} />
+                <span className="session-item-status">{s.status}</span>
+                {(s.status === "succeeded" || s.status === "deploying") && (
+                  <button
+                    className="destroy-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      destroySession(s.id);
+                    }}
+                    title="Destroy project"
+                  >
+                    🗑
                   </button>
-                  <p className="muted">{project.repository_url ?? "GitHub repository pending"}</p>
-                </div>
-              ))
-            ) : (
-              <p className="muted">No projects loaded yet.</p>
-            )}
-          </section>
-        </section>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
 
-        <aside className="stack">
-          <section className="panel stack">
-            <h2>Repository and Artifacts</h2>
-            <p>GitHub: {session?.repository_url ? <a href={session.repository_url}>{session.repository_url}</a> : <span className="muted">Not created yet</span>}</p>
-            <p>Architecture: {session?.architecture_doc_url ? <a href={session.architecture_doc_url}>ARCHITECTURE.md</a> : <span className="muted">Pending</span>}</p>
-            <p>Compliance: {session?.compliance_report_url ? <a href={session.compliance_report_url}>COMPLIANCE.md</a> : <span className="muted">Pending</span>}</p>
-            <p>S3 Bucket: {session?.resources?.s3_bucket?.bucket_uri ? <code>{String(session.resources.s3_bucket.bucket_uri)}</code> : <span className="muted">Not created</span>}</p>
-            <p>EC2 URL: {session?.resources?.ec2_httpd?.url ? <a href={String(session.resources.ec2_httpd.url)}>{String(session.resources.ec2_httpd.url)}</a> : <span className="muted">Not created</span>}</p>
-            <p>
-              EC2 PEM: {session?.resources?.ec2_httpd?.ssh_private_key_attachment?.download_url ? (
-                <a href={String(session.resources.ec2_httpd.ssh_private_key_attachment.download_url)}>
-                  Download private key
-                </a>
-              ) : (
-                <span className="muted">Not requested; SSM Session Manager is preferred</span>
+        <div className="sidebar-footer">
+          <a href="/projects" className="sidebar-link">All Projects</a>
+          <a href="/admin" className="sidebar-link">Admin</a>
+        </div>
+      </aside>
+
+      {/* ──── MAIN AREA ──── */}
+      <main className="chat-main">
+        {!activeId ? (
+          <div className="chat-empty">
+            <div className="chat-empty-icon">⚡</div>
+            <h2>AWS Infrastructure AI Agent</h2>
+            <p>Create or update cloud infrastructure using natural language.</p>
+            <button className="new-chat-btn-center" onClick={createSession}>
+              Start a new chat
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Header */}
+            <div className="chat-header">
+              <div className="chat-header-title">
+                {session?.spec?.name ?? "New conversation"}
+                {session?.status && (
+                  <span className={`header-status-badge ${statusBadge(session.status)}`}>
+                    {session.status}
+                  </span>
+                )}
+              </div>
+              <div className="chat-header-actions">
+                {session?.repository_url && (
+                  <a
+                    href={session.repository_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="header-link"
+                  >
+                    GitHub ↗
+                  </a>
+                )}
+                <button className="clear-btn" onClick={clearChat} title="Clear chat history">
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            {/* Messages */}
+            <div className="messages-area">
+              {messages.map((msg, i) => (
+                <MessageBubble key={i} msg={msg} />
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Approval banner */}
+            {awaitingApproval && (
+              <div className="approval-banner">
+                <span>Infrastructure is ready for review.</span>
+                <button
+                  className={`approve-btn ${busy ? "approve-btn-disabled" : ""}`}
+                  onClick={approveDeployment}
+                  disabled={busy}
+                >
+                  {busy ? "Deploying..." : "✓ Approve & Deploy"}
+                </button>
+              </div>
+            )}
+
+            {/* Composer */}
+            <div className="composer">
+              <textarea
+                ref={textareaRef}
+                className="composer-input"
+                rows={1}
+                placeholder={
+                  busy
+                    ? "Agent is working..."
+                    : "Tell the agents what to build..."
+                }
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={busy}
+              />
+              <button
+                className={`send-btn ${busy || !input.trim() ? "send-btn-disabled" : ""}`}
+                onClick={sendMessage}
+                disabled={busy || !input.trim()}
+                title="Send"
+              >
+                {busy ? (
+                  <span className="spinner" />
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                  </svg>
+                )}
+              </button>
+              {busy && (
+                <button className="stop-btn" onClick={stopCurrentRun} title="Stop">
+                  ■
+                </button>
               )}
-            </p>
-            <p>S3 State: {session?.resources?.project_state?.state_uri ? <code>{String(session.resources.project_state.state_uri)}</code> : <span className="muted">Pending</span>}</p>
-            <p>S3 Logs: {session?.resources?.project_state?.logs_uri ? <code>{String(session.resources.project_state.logs_uri)}</code> : <span className="muted">Pending</span>}</p>
-            <p>AgentCore Memory: {session?.resources?.agentcore_memory_id ? <code>{String(session.resources.agentcore_memory_id)}</code> : <span className="muted">Not configured</span>}</p>
-          </section>
+            </div>
 
-          <section className="panel stack">
-            <h2>Execution Logs</h2>
-            {session?.events.length ? (
-              <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
-                {session.events.map(formatTerminalEvent).join("\n")}
-              </pre>
-            ) : (
-              <p className="muted">Start chatting to see agent activity.</p>
+            {/* Execution log */}
+            {session && session.events.length > 0 && (
+              <ExecutionLog session={session} />
             )}
-          </section>
-        </aside>
-      </div>
-    </main>
+          </>
+        )}
+      </main>
+    </div>
   );
 }
 
-function formatTerminalEvent(event: DeploymentEvent) {
-  const details = Object.keys(event.details ?? {}).length ? `\n${JSON.stringify(event.details, null, 2)}` : "";
-  return `[${new Date(event.timestamp).toLocaleTimeString()}] ${event.agent} ${event.status} ${event.severity}\n$ ${event.message}${details}`;
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function MessageBubble({ msg }: { msg: ChatMessage }) {
+  if (msg.role === "thinking") {
+    return (
+      <div className="bubble-row bubble-row-assistant">
+        <div className="bubble bubble-thinking">
+          <ThinkingDots />
+          <span className="thinking-text">{msg.content}</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (msg.role === "user") {
+    return (
+      <div className="bubble-row bubble-row-user">
+        <div className="bubble bubble-user">
+          <MarkdownText text={msg.content} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bubble-row bubble-row-assistant">
+      <div className="agent-avatar">⚡</div>
+      <div className="bubble bubble-assistant">
+        <MarkdownText text={msg.content} />
+      </div>
+    </div>
+  );
+}
+
+function ThinkingDots() {
+  return (
+    <span className="thinking-dots">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <span>
+      {lines.map((line, i) => {
+        // Bold **text**
+        const parts = line.split(/(\*\*[^*]+\*\*)/g).map((part, j) => {
+          if (part.startsWith("**") && part.endsWith("**")) {
+            return <strong key={j}>{part.slice(2, -2)}</strong>;
+          }
+          // Inline code `text`
+          return <span key={j}>{part}</span>;
+        });
+        return (
+          <span key={i}>
+            {parts}
+            {i < lines.length - 1 && <br />}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+function ExecutionLog({ session }: { session: DeploymentSession }) {
+  const [open, setOpen] = useState(false);
+  const severityColor: Record<string, string> = {
+    success: "#22c55e",
+    error: "#ef4444",
+    warning: "#f59e0b",
+    info: "#60a5fa",
+  };
+
+  return (
+    <div className="exec-log">
+      <button className="exec-log-toggle" onClick={() => setOpen((o) => !o)}>
+        {open ? "▼" : "▶"} Execution Log ({session.events.length} events)
+      </button>
+      {open && (
+        <div className="exec-log-body">
+          {session.events.map((ev, i) => (
+            <div key={i} className="log-line">
+              <span className="log-ts">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+              <span className="log-agent">[{ev.agent}]</span>
+              <span style={{ color: severityColor[ev.severity] ?? "#fff" }}>
+                {ev.message}
+              </span>
+              {ev.details?.repository_url && (
+                <a
+                  className="log-link"
+                  href={ev.details.repository_url as string}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View Repo ↗
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
