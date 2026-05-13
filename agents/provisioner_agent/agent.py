@@ -104,7 +104,20 @@ def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
     expected = {"versions.tf", "variables.tf", "backend.tf", "main.tf"}
     if not expected.issubset(files):
         return None
-    return {str(path): str(content) for path, content in files.items() if path in expected}
+    normalized = {str(path): str(content) for path, content in files.items() if path in expected}
+
+    # Reject LLM output if workload-defining markers are missing; fallback will use deterministic generator.
+    marker_map = {
+        "ec2-httpd": "aws_instance",
+        "s3-bucket": "aws_s3_bucket",
+        "s3-lambda-api": "aws_lambda_function",
+        "vpc-baseline": "aws_vpc",
+    }
+    marker = marker_map.get(str(spec.get("workload_type", "")))
+    main_tf = normalized.get("main.tf", "")
+    if marker and marker not in main_tf:
+        return None
+    return normalized
 
 
 def _common_versions_tf() -> str:
