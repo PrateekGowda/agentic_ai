@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { DeploymentSession } from "@repo/contracts";
+import type { DeploymentSession } from "@agentcore-deployer/contracts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
