@@ -509,25 +509,31 @@ function ExecutionLog({ session }: { session: DeploymentSession }) {
       </button>
       {open && (
         <div className="exec-log-body">
-          {session.events.map((ev, i) => (
-            <div key={i} className="log-line">
-              <span className="log-ts">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-              <span className="log-agent">[{ev.agent}]</span>
-              <span style={{ color: severityColor[ev.severity] ?? "#fff" }}>
-                {ev.message}
-              </span>
-              {ev.details?.repository_url && (
-                <a
-                  className="log-link"
-                  href={ev.details.repository_url as string}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  View Repo ↗
-                </a>
-              )}
-            </div>
-          ))}
+          {session.events.map((ev, i) => {
+            const repoUrl =
+              ev.details && typeof ev.details.repository_url === "string"
+                ? ev.details.repository_url
+                : null;
+            return (
+              <div key={i} className="log-line">
+                <span className="log-ts">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                <span className="log-agent">[{ev.agent}]</span>
+                <span style={{ color: severityColor[ev.severity] ?? "#fff" }}>
+                  {ev.message}
+                </span>
+                {repoUrl ? (
+                  <a
+                    className="log-link"
+                    href={repoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    View Repo ↗
+                  </a>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
