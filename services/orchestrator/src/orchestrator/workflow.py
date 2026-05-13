@@ -735,6 +735,12 @@ phases:
     commands:
       - |
         set -eu
+        if ! command -v terraform >/dev/null 2>&1; then
+          curl -fsSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/terraform.zip').extractall('/tmp')"
+          install -m 0755 /tmp/terraform /usr/local/bin/terraform
+        fi
+        terraform version
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
@@ -872,6 +878,12 @@ phases:
     commands:
       - |
         set -eu
+        if ! command -v terraform >/dev/null 2>&1; then
+          curl -fsSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/terraform.zip').extractall('/tmp')"
+          install -m 0755 /tmp/terraform /usr/local/bin/terraform
+        fi
+        terraform version
         TOKEN_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["GITHUB_TOKEN"], safe=""))')
         git clone --depth 1 "https://x-access-token:${TOKEN_ENCODED}@github.com/${GITHUB_REPOSITORY}.git" repo
         cd repo/terraform
