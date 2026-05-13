@@ -33,7 +33,7 @@ if str(AGENTS_ROOT) not in sys.path:
 
 from compliance_agent import run_compliance_checks  # noqa: E402
 from deployer_agent import run_deployment_step  # noqa: E402
-from provisioner_agent import provision_repository_payload  # noqa: E402
+from provisioner_agent import generate_deterministic_terraform_files, provision_repository_payload  # noqa: E402
 from requirement_agent import handle_requirement_message  # noqa: E402
 
 
@@ -118,6 +118,9 @@ class DeploymentWorkflow:
         validation_errors = self._validate_generated_files(session.spec, files)
         if validation_errors:
             files = self._repair_generated_files(data, files)
+            validation_errors = self._validate_generated_files(session.spec, files)
+        if validation_errors:
+            files = self._deterministic_terraform_repair(session.spec, files)
             validation_errors = self._validate_generated_files(session.spec, files)
 
         if validation_errors:
@@ -224,6 +227,17 @@ class DeploymentWorkflow:
         for path, content in dict(data.get("repair_files") or {}).items():
             if isinstance(path, str) and isinstance(content, str):
                 repaired[path] = content
+        repaired.setdefault(
+            "terraform/README.md",
+            "Run `terraform init`, `terraform plan`, and `terraform apply` through the approved pipeline.\n",
+        )
+        return repaired
+
+    def _deterministic_terraform_repair(self, spec: DeploymentSpec, files: dict[str, str]) -> dict[str, str]:
+        repaired = dict(files)
+        deterministic = generate_deterministic_terraform_files(spec.model_dump(mode="json"))
+        for path, content in deterministic.items():
+            repaired[f"terraform/{path}"] = content
         repaired.setdefault(
             "terraform/README.md",
             "Run `terraform init`, `terraform plan`, and `terraform apply` through the approved pipeline.\n",

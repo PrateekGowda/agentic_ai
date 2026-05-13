@@ -75,6 +75,11 @@ def provision_repository_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_deterministic_terraform_files(spec: dict[str, Any]) -> dict[str, str]:
+    """Public helper so orchestrator can force deterministic Terraform fallback."""
+    return _generate_terraform(spec)
+
+
 def _generate_terraform(spec: dict[str, Any]) -> dict[str, str]:
     workload = spec["workload_type"]
     if workload == "ec2-httpd":
@@ -85,6 +90,10 @@ def _generate_terraform(spec: dict[str, Any]) -> dict[str, str]:
 
 
 def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
+    # Keep foundational workloads deterministic for reliability.
+    if str(spec.get("workload_type")) in {"ec2-httpd", "s3-bucket", "vpc-baseline"}:
+        return None
+
     result = ask_llm_json(
         "You are a senior AWS Terraform engineer. Return only JSON with Terraform file contents.",
         (
