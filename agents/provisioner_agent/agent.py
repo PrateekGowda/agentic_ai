@@ -105,6 +105,22 @@ def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
     if not expected.issubset(files):
         return None
     normalized = {str(path): str(content) for path, content in files.items() if path in expected}
+    main_tf = normalized.get("main.tf", "")
+    backend_tf = normalized.get("backend.tf", "")
+
+    # Basic safety checks for common invalid LLM patterns.
+    if backend_tf.count("{") != backend_tf.count("}"):
+        return None
+    if "backend \"s3\"" not in backend_tf:
+        return None
+    if "hack-aib-tf-backend" not in backend_tf:
+        return None
+    if "var." in backend_tf:
+        return None
+    if main_tf.count("{") != main_tf.count("}"):
+        return None
+    if "public_access_block_configuration" in main_tf:
+        return None
 
     # Reject LLM output if workload-defining markers are missing; fallback will use deterministic generator.
     marker_map = {
@@ -114,9 +130,17 @@ def _generate_terraform_with_llm(spec: dict[str, Any]) -> dict[str, str] | None:
         "vpc-baseline": "aws_vpc",
     }
     marker = marker_map.get(str(spec.get("workload_type", "")))
-    main_tf = normalized.get("main.tf", "")
     if marker and marker not in main_tf:
         return None
+
+    if str(spec.get("workload_type")) == "s3-bucket":
+        required_s3_resources = (
+            "aws_s3_bucket_public_access_block",
+            "aws_s3_bucket_versioning",
+            "aws_s3_bucket_server_side_encryption_configuration",
+        )
+        if not all(resource in main_tf for resource in required_s3_resources):
+            return None
     return normalized
 
 

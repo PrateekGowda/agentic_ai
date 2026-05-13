@@ -256,9 +256,18 @@ class DeploymentWorkflow:
                 errors.append(f"missing or empty {path}")
 
         main_tf = files.get("terraform/main.tf", "")
+        backend_tf = files.get("terraform/backend.tf", "")
         marker = self._expected_terraform_marker(spec)
         if marker and marker not in main_tf:
             errors.append(f"terraform/main.tf does not include expected {spec.workload_type} resource marker `{marker}`")
+        if "public_access_block_configuration" in main_tf:
+            errors.append(
+                "terraform/main.tf uses inline public_access_block_configuration; use aws_s3_bucket_public_access_block resource instead"
+            )
+        if backend_tf and "backend \"s3\"" in backend_tf and "var." in backend_tf:
+            errors.append("terraform/backend.tf uses variables in backend block, which Terraform does not allow")
+        if backend_tf and "hack-aib-tf-backend" not in backend_tf:
+            errors.append("terraform/backend.tf must use the hack-aib-tf-backend state bucket")
         unresolved = [placeholder for placeholder in ("${name}", "${region}", "${environment}", "${owner}", "${cost_center}") if placeholder in main_tf]
         if unresolved:
             errors.append(f"terraform/main.tf contains unresolved template variables: {', '.join(unresolved)}")
